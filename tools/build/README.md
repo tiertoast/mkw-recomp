@@ -117,3 +117,8 @@ The entry point selects the Apple Clang drivers and macOS SDK with `xcrun`. CMak
 This target links libSystem and libc++. Its synthetic executable exercises the runtime registry, dispatcher,
 module loader, threading primitives and Mach virtual memory. See the [test commands and ABI contract](../../tests/macos/README.md).
 The SDL/Vulkan [G1 probe](../macos-probe/README.md) has its own build target.
+
+### Darwin runtime-only link target
+
+Use `--target macos-x86_64 --runtime-only` to compile the runtime and attempt a native link from the same
+source tree. See [macos-runtime/](../macos-runtime/README.md) for dependencies and the current link boundary.
