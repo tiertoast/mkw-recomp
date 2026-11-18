@@ -2,6 +2,8 @@
 
 | File | What it is |
 |---|---|
+| `darwin_thread.c`, `darwin_sync.c` | Native pthread handles, monotonic time, shared/exclusive locks and condition variables on public Darwin address waits |
+| `darwin_file.c` | Read-only file and module-ID discovery for the Darwin loader |
 | `platform.h` | The operating system interface the rest of the runtime uses |
 | `linux.c`, `linux_int.h` | Linux: threads, preemption through signals, fibers; the header is what the `linux_*.c` parts share |
 | `linux_sync.c` | Linux: clock, locks and condition variables on futex |

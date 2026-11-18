@@ -83,12 +83,12 @@ void plat_event_wait(PlatEvent *e) {
 }
 
 int plat_event_wait_ns(PlatEvent *e, uint64_t ns) {
-    uint64_t end = plat_now_ns() + ns;
+    uint64_t start = plat_now_ns();
     plat_mutex_lock(&e->m);
     while (!e->set) {
-        uint64_t now = plat_now_ns();
-        if (now >= end) break;
-        plat_cond_wait_ns(&e->c, &e->m, end - now);
+        uint64_t elapsed = plat_now_ns() - start;
+        if (elapsed >= ns) break;
+        plat_cond_wait_ns(&e->c, &e->m, ns - elapsed);
     }
     int got = e->set;
     if (got && !e->manual) e->set = 0;

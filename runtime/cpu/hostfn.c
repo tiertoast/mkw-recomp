@@ -25,6 +25,14 @@ __attribute__((section(".obs$a"), used)) static const RtHostEntry obs_start[1];
 __attribute__((section(".obs$z"), used)) static const RtHostEntry obs_stop[1];
 __attribute__((section(".fns$a"), used)) static const RtHostEntry fns_start[1];
 __attribute__((section(".fns$z"), used)) static const RtHostEntry fns_stop[1];
+#elif defined(__APPLE__)
+// ld creates equal bounds for an empty section. These are relocated addresses in this image.
+#define MACH_TABLE(kind) \
+    extern const RtHostEntry kind##_start[] __asm("section$start$__DATA_CONST$__mkw_" #kind); \
+    extern const RtHostEntry kind##_stop[] __asm("section$end$__DATA_CONST$__mkw_" #kind)
+MACH_TABLE(ovr);
+MACH_TABLE(obs);
+MACH_TABLE(fns);
 #else
 // ELF: the linker defines __start_<section> and __stop_<section> around a section named like a C identifier. Weak: a
 // build without observers has no such section, and both bounds are then NULL.

@@ -9,6 +9,7 @@ Each folder holds the tests of one part of the repo, with the C sources they bui
 |---|---|
 | [translator/](translator/README.md) | The shader translator, the SPIR-V patcher and the recompiler's code patches |
 | [launcher/](launcher/README.md) | The setup, the installation selector and Add to Steam |
+| [macos/](macos/README.md) | Local Darwin thread and Mach-O module/registry tests, built with CMake |
 | [runtime/](runtime/README.md) | Pieces of `runtime/` built alone: audio, controllers, memory caps, settings, menu texts |
 | [widescreen/](widescreen/README.md) | Window aspect, FOV and UI fitting |
 | [github/](github/README.md) | The issue moderation bot |

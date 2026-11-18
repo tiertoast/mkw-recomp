@@ -97,6 +97,10 @@ typedef struct { const char *name; GuestFn fn; } RtHostEntry;
 // __stop_mkw_ovr.
 #ifdef _WIN32
 #define RT_HOST_SECTION(kind) section("." #kind "$m")
+#elif defined(__APPLE__)
+// ld concatenates these declarations into an array. Preserve the record stride even in ASan builds:
+// Clang otherwise inserts a redzone after each global. The table readers and registered functions stay instrumented.
+#define RT_HOST_SECTION(kind) section("__DATA_CONST,__mkw_" #kind), aligned(__alignof__(RtHostEntry)), no_sanitize("address")
 #else
 #define RT_HOST_SECTION(kind) section("mkw_" #kind)
 #endif
