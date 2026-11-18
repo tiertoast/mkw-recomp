@@ -32,9 +32,11 @@
 // inheritance and the preemption disable without interrupting owners.
 #define AP_GAP_NS 1000000ull    // and interrupts the same owner at most this often
 int g_ap = -1, g_ap_int;   // g_ap_int: interrupt owners (MKW_ASYNC_PREEMPT=2: inheritance and disable only)
+#if KERN_HAS_INTERRUPT
 static int g_ap_log;              // redirects logged so far (AP_LOG_N)
 #define AP_LOG_N 40
 static uintptr_t g_gen_lo, g_gen_hi;   // host code of the lifted modules: first and last function start
+#endif
 uint64_t g_ap_sent, g_ap_taken, g_ap_host, g_ap_pc, g_ap_deferred, g_ap_fail, g_ap_spin_ok;
 void kern_ap_stub(void);
 
@@ -42,6 +44,11 @@ void ap_init(void) {
     if (g_ap >= 0) return;
     const char *e = cfg_value("MKW_ASYNC_PREEMPT");
     g_ap = strcmp(e, "0") != 0;
+#if !KERN_HAS_INTERRUPT
+    // Cooperative arbitration needs only guest priorities and TLR, even with no lifted code range.
+    g_ap_int = 0;
+    rt_log("kernel: Darwin cooperative scheduling, priority inheritance and preemption disable %s", g_ap ? "on" : "off");
+#else
     g_ap_int = g_ap && strcmp(e, "2") != 0;
     if (g_ap) {
         RtModule m[16];
@@ -71,6 +78,7 @@ void ap_init(void) {
            "code exe+%#llx-exe+%#llx", g_ap_int ? "on" : "off", g_ap ? "on (MKW_ASYNC_PREEMPT=0 turns all off)" : "off",
            (unsigned long long)(g_gen_lo ? g_gen_lo - plat_exe_base() : 0),
            (unsigned long long)(g_gen_hi ? g_gen_hi - plat_exe_base() : 0));
+#endif
 }
 
 // Horizon's priority inheritance: o counts at the priority of the best thread blocked on a guest mutex it owns (the
@@ -92,6 +100,7 @@ int prio_of(const RtThread *t) { return g_ap > 0 ? eff_prio(t) : t->prio; }
 volatile uint16_t *ap_tlr(const RtThread *t) { return (volatile uint16_t *)(t->tlr + 0x100); }
 int ap_disabled(const RtThread *t) { return g_ap > 0 && ap_tlr(t)[0]; }
 
+#if KERN_HAS_INTERRUPT
 // kern_ap_stub: entered in place of the interrupted instruction of top-level game code. It keeps every register the
 // game code may have live (volatile GPRs, flags, YMM0-15, MXCSR; the C calls preserve the rest), gives the core up
 // in kern_ap_yield and goes back to kern_ap_rip(), whose value it first stores in the return slot it reserved at
@@ -409,3 +418,5 @@ int ap_try(RtThread *w) {
     }
     return r;
 }
+
+#endif   // asynchronous interruption backends

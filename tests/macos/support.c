@@ -1,7 +1,5 @@
-// Fixture dependencies of the real dispatcher and registry. Entering a guest kernel/service path fails the test.
+// Diagnostics and optional services shared by the synthetic ABI and kernel fixtures.
 #include "host.h"
-#include "gamelib.h"
-#include "cfg.h"
 #include "platform/platform.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,13 +7,7 @@
 #include <math.h>
 #include <unistd.h>
 
-extern const char *fixture_dir;
-const char *cfg_game_dir(void) { return fixture_dir; }
-const RtGame *rt_game_builtin(void) { return NULL; }
-const char *cfg_get(const char *name) { return getenv(name); }
 unsigned rt_trace;
-volatile uint32_t prof_render_tid;
-int kern_host_track;
 
 void rt_log(const char *fmt, ...) {
     va_list ap;
@@ -43,12 +35,6 @@ void plat_mem_info(float *used, float *total, float *proc) {
     *used = NAN;
 }
 
-void kern_checkpoint(void) { abort(); }
-int kern_core_away(void) { abort(); }
-void kern_core_back(int *away) { (void)away; abort(); }
-void kern_host_left(void *t) { (void)t; abort(); }
-void rt_spin_gate(Cpu *c, uint64_t head) { (void)c; (void)head; abort(); }
-void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) { (void)c; (void)imm; (void)pc; abort(); }
 void rt_udf(Cpu *c, uint64_t pc) { (void)c; (void)pc; abort(); }
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) { (void)addr; (void)lr; (void)x0; abort(); }
 uint64_t rt_ticks(void) { return plat_now_ns() / RT_TICK_NS; }

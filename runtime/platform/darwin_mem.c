@@ -172,3 +172,9 @@ int plat_mem_replace_anon(uint64_t addr, uint64_t n) {
     (void)addr; (void)n;
     return 0;   // External placed Vulkan mappings do not participate in Darwin reservation ownership.
 }
+
+void *plat_aligned_alloc(size_t size, size_t align) {
+    void *p;
+    return posix_memalign(&p, align, size) ? NULL : p;
+}
+void plat_aligned_free(void *p) { free(p); }

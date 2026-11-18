@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(mkw_darwin_foundations LANGUAGES C CXX)
+project(mkw_darwin_foundations LANGUAGES C CXX ASM)
 if(NOT APPLE OR NOT CMAKE_C_COMPILER_ID STREQUAL "AppleClang" OR NOT CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64"
    OR NOT MKW_GAME_ID OR NOT MKW_HOST_EXPORTS)
   message(FATAL_ERROR "Configure via tools/build/build.py --target macos-x86_64")
@@ -72,3 +72,22 @@ if(MKW_TEST_NVK)
   add_test(NAME darwin-vm-nvk COMMAND vm-vulkan)
   set_tests_properties(darwin-vm-nvk PROPERTIES TIMEOUT 60)
 endif()
+
+add_executable(scheduler-test scheduler.c support.c "${rt}/core/memory/memory.c" "${rt}/core/base/cfg.c"
+               "${rt}/core/diag/perf.c" "${rt}/core/boot/gamelib.c" "${rt}/cpu/dispatch.c" "${rt}/cpu/hostfn.c"
+               "${rt}/cpu/sjlj.c")
+target_include_directories(scheduler-test PRIVATE "${rt}/core/kernel" "${rt}/gfx/nvn/host" "${rt}/gfx/nvn/api" "${rt}/gfx/nvn/procs")
+target_link_libraries(scheduler-test PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,darwin-kernel>" mkw-host)
+set_target_properties(scheduler-test PROPERTIES C_VISIBILITY_PRESET hidden)
+add_test(NAME darwin-scheduler COMMAND scheduler-test scheduler)
+add_test(NAME darwin-guest-fiber COMMAND scheduler-test fiber)
+set_tests_properties(darwin-scheduler darwin-guest-fiber PROPERTIES TIMEOUT 12
+                     ENVIRONMENT "MKW_ASYNC_PREEMPT=2;MKW_FREE_CORES=0;MKW_CORE_NUM_GATE=0;MKW_SPIN_HANDOFF_US=0")
+set_property(TEST darwin-guest-fiber APPEND PROPERTY ENVIRONMENT "MKW_CORE_DIAG=1")
+
+add_executable(fiber-test fibers.c fiber_regs.S)
+target_link_libraries(fiber-test PRIVATE darwin-platform)
+add_test(NAME darwin-fiber-context COMMAND fiber-test)
+add_test(NAME darwin-fiber-guard COMMAND fiber-test guard)
+set_tests_properties(darwin-fiber-context darwin-fiber-guard PROPERTIES TIMEOUT 8)
+set_tests_properties(darwin-fiber-context darwin-fiber-guard darwin-guest-fiber PROPERTIES SKIP_RETURN_CODE 77)

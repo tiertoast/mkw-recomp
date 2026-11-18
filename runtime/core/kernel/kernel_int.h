@@ -182,6 +182,12 @@ int dg_in_host(const RtThread *o);   // kernel_diag.c
 int dg_class0(const RtThread *t);   // kernel_diag.c
 void dg_done(RtThread *t);   // kernel_diag.c
 void dg_sample(RtThread *t);   // kernel_diag.c
+// Darwin supports cooperative checkpoints only, including when core diagnostics are enabled.
+#ifdef __APPLE__
+#define KERN_HAS_INTERRUPT 0
+#else
+#define KERN_HAS_INTERRUPT 1
+#endif
 extern int g_ap, g_ap_int;   // kernel_preempt.c
 extern uint64_t g_ap_sent, g_ap_taken, g_ap_host, g_ap_pc, g_ap_deferred, g_ap_fail, g_ap_spin_ok;   // kernel_preempt.c
 void ap_init(void);   // kernel_preempt.c

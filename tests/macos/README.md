@@ -91,5 +91,33 @@ env CFLAGS=-fsanitize=thread CXXFLAGS=-fsanitize=thread LDFLAGS=-fsanitize=threa
 ctest --test-dir build/g2b-tsan -R '^darwin-vm$' --repeat until-fail:10
 ```
 
-Further gates cover fibers, scheduler integration, filesystem and process services, crash diagnostics, renderer
-integration and setup of generated modules.
+## Cooperative guest kernel
+
+`darwin-kernel` links the existing six-core arbiter, guest mutex and thread waits, fiber host overrides and
+scheduler diagnostics with the Darwin platform archive. Darwin defaults to `MKW_ASYNC_PREEMPT=2`. A request
+for 1 also runs cooperatively. Zero retains the explicit opt-out from inheritance and the TLR disable protocol.
+The core gate uses the existing settings and masks. The cooperative policy runs without scanning module addresses.
+A checkpoint defers handoff while TLR+0x100 is set. After the SDK clears it, SVC 0x36 honors the pending handoff.
+CPU-only code without a checkpoint can keep its guest core indefinitely.
+
+`fibers.c` and `fiber_regs.S` exercise guarded demand-paged stacks, all six SysV preserved integer registers,
+entry alignment, x87 rounding, MXCSR control and flags, and A→B→A pthread migration. The 512-byte FXSAVE64 image
+belongs to the fiber. AVX upper lanes are caller-saved at the switch call. TLS and signal masks belong to the
+executing pthread. A guest nonlocal return to a live owner frame uses the Mach-O continuation in
+`darwin_switch.S`. ExitThread unwinds on the current worker's base stack.
+
+`scheduler.c` uses a synthetic builtin module, real host registration/dispatch, the G2-B guest layout and the
+production kernel SVC handler. Three workers contend for the same guest core. The test checks inheritance from
+an actual mutex waiter, the protected checkpoint and SVC 0x36, peer yield, timed wait, wakeup, exit and core
+release. Its guest-fiber variant moves a suspended host call and a live nonlocal-return frame to another guest
+thread with core diagnostics enabled.
+
+```sh
+uv run tools/build/build.py --target macos-x86_64 --out build/g2c
+ctest --test-dir build/g2c -R '^darwin-(guest-fiber|fiber-context)$' --repeat until-fail:10 --output-on-failure
+ctest --test-dir build/g2c -R '^(darwin-scheduler|darwin-fiber-guard|macho-roundtrip|darwin-vm)$' --output-on-failure
+```
+
+For an ASan+UBSan or TSan build, run `ctest -R '^darwin-scheduler$'` against its build directory.
+The assembly stack switches have no ASan/TSan annotations; those cases report a skip when instrumented.
+The complete runtime still needs its remaining platform services, renderer integration and module setup.
