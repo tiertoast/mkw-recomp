@@ -302,6 +302,7 @@ static int create_device(void) {
     // PAGEMAP_SCAN) does not see writes into the driver's mapping, so every page there counts as written and its
     // textures would be uploaded again at every check.
     int has_placed = 0;
+#ifndef __APPLE__   // Darwin retains ownership of every guest mapping across decommit.
     if (has_ext(ep, ne, VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME) && has_ext(ep, ne, VK_KHR_MAP_MEMORY_2_EXTENSION_NAME) &&
         cfg_get("MKW_VK_PLACED") && atoi(cfg_get("MKW_VK_PLACED"))) {
         has_placed = 1;
@@ -309,6 +310,7 @@ static int create_device(void) {
         ext[n_ext++] = VK_KHR_MAP_MEMORY_2_EXTENSION_NAME;
         CHAIN(placed, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT);
     }
+#endif
     if (has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
         g_vk.has_emh = 1;
         ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;

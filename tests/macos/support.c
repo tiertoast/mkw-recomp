@@ -5,7 +5,6 @@
 #include "platform/platform.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/mman.h>
 #include <libproc.h>
 #include <math.h>
 #include <unistd.h>
@@ -30,14 +29,6 @@ void rt_log_raw(const char *p, size_t n) { fwrite(p, 1, n, stderr); }
 const char *ldr_describe(uint64_t a, char *buf, int n) { return rt_guest_name(a, buf, n); }
 void rt_patch_hosts(void) { /* This module declares no patches. */ }
 
-// Only anonymous storage for dispatch.c's address-to-function table, sealed read-only by the dispatcher.
-void *plat_mem_alloc(size_t n) {
-    void *p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    return p == MAP_FAILED ? NULL : p;
-}
-int plat_mem_protect(uint64_t addr, uint64_t n, int prot) {
-    return prot == PLAT_PROT_READ && mprotect((void *)(uintptr_t)addr, n, PROT_READ) == 0;
-}
 // rt_fatal prints process diagnostics even for a rejected library. Mark unavailable counters explicitly.
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes) {
     struct proc_taskinfo info;

@@ -81,6 +81,7 @@ static int gen_watch_fault(uint64_t addr, uint64_t rip) {
 }
 
 static void gen_watch_start(uint64_t code) {
+    if (!PLAT_CAN_RETRY_FAULT) return;
     static volatile int32_t started;
     const char *e = cfg_get("MKW_GEN_WATCH");
     if (!e || !atoi(e) || plat_inc32(&started) != 1) return;
@@ -115,6 +116,7 @@ static int write_watch_fault(uint64_t addr, uint64_t rip) {
 }
 
 void nvn2_write_watch_arm(void) {
+    if (!PLAT_CAN_RETRY_FAULT) return;
     static int state = -1;   // -1 unread, 0 off, 1 on
     if (state < 0) {
         const char *e = cfg_get("MKW_WRITE_WATCH");
