@@ -38,6 +38,7 @@ only registrations with targeted whole-archive linkage. Registry construction/se
 | `module.c` | One synthetic address calls through `rt_sj_owner`, re-enters its C body and dispatches to the registered host function |
 | `empty.c` | Empty linked override and observer table bounds with the production lookup functions |
 | `check.py` | Mach-O slices, two-level imports, exported symbols, section presence, relocation, readiness and rejection of wrong architecture, ABI, ID or entry |
+| `files.c` | Positional file I/O, paths, append records, atomic saves, rename and interprocess locks |
 | `threads.c` | Thread names and stack, timed join followed by join, detach, event and condition signaling, shared/exclusive contention, recursive ownership and once |
 | `support.c` | Fixture configuration and diagnostics. The dispatch table uses native Darwin VM. Entry into an unavailable scheduler or service fails the process |
 
@@ -121,3 +122,15 @@ ctest --test-dir build/g2c -R '^(darwin-scheduler|darwin-fiber-guard|macho-round
 For an ASan+UBSan or TSan build, run `ctest -R '^darwin-scheduler$'` against its build directory.
 The assembly stack switches have no ASan/TSan annotations; those cases report a skip when instrumented.
 The complete runtime still needs its remaining platform services, renderer integration and module setup.
+
+## Files and saves
+
+From a configured foundations build, build and run just the two filesystem fixtures:
+
+```sh
+cmake --build build/macos-x86_64-g2a --target darwin-file-test
+ctest --test-dir build/macos-x86_64-g2a -R '^darwin-(files-and-log|atomic-saves)$' --output-on-failure
+```
+
+These use a private temporary directory. The save test verifies that an interrupted staged write removes its
+temporary entry, that a competing temporary symlink is preserved, and that the OS releases the lock at process exit.
