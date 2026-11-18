@@ -236,6 +236,10 @@ int kern_svc(Cpu *c, uint32_t imm) {
         volatile uint16_t *flag = (volatile uint16_t *)(t->tlr + 0x102);
         __atomic_fetch_add(&g_sync36, 1, __ATOMIC_RELAXED);
         if (*flag) __atomic_fetch_add(&g_sync36_flag, 1, __ATOMIC_RELAXED);
+        if (!KERN_HAS_INTERRUPT && ap_disabled(t)) {   // A nested disable still holds the core and pending flag.
+            x[0] = R_OK;
+            return 1;
+        }
         *flag = 0;
         ap_sync(t);
         x[0] = R_OK;

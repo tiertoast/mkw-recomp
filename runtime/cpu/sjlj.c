@@ -14,7 +14,17 @@
 #ifdef _WIN32
 #define __USE_MINGW_SETJMP_NON_SEH   // as runtime/core/kernel/kernel_int.h: longjmp restores registers, no SEH unwind
 #endif
+#ifdef __APPLE__
+#include "platform/darwin_context.h"
+typedef DarwinGuestJump GuestJump;
+#define guest_save(j) darwin_guest_save(&(j))
+#define guest_resume(j) darwin_guest_resume(&(j))
+#else
 #include <setjmp.h>
+typedef jmp_buf GuestJump;
+#define guest_save(j) setjmp(j)
+#define guest_resume(j) longjmp(j, 1)
+#endif
 
 #include "cpu.h"
 #include "dispatch.h"
@@ -24,7 +34,7 @@ typedef struct SjSlot {
     struct SjSlot *up;   // the owner below, or NULL
     uint64_t lo, hi;     // the owner's guest code [lo, hi)
     int depth;           // the thread's host depth at entry (hostfn.c), put back by a longjmp out of host calls
-    jmp_buf jb;
+    GuestJump jb;
 } SjSlot;
 
 void rt_sj_owner(Cpu *c, GuestFn body, uint64_t lo, uint64_t hi) {
@@ -32,7 +42,7 @@ void rt_sj_owner(Cpu *c, GuestFn body, uint64_t lo, uint64_t hi) {
     c->sj = &s;
     // Both returns run the body: first from the entry, after a longjmp from the setjmp's return address. c and body
     // are not written after setjmp, so their values survive the longjmp.
-    setjmp(s.jb);
+    guest_save(s.jb);
     body(c);
     c->sj = s.up;
 }
@@ -49,6 +59,6 @@ void rt_sj_resume(Cpu *c) {
         }
         c->sj = s;   // owners above it are gone, as their guest frames are
         if (c->thread) *kern_host_depth(c->thread) = s->depth;
-        longjmp(s->jb, 1);
+        guest_resume(s->jb);
     }
 }

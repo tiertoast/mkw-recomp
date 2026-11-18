@@ -17,3 +17,10 @@ _Noreturn void plat_reexec(void) {
     perror("Darwin VM: re-executing the process");
     _Exit(70);
 }
+
+uintptr_t plat_exe_base(void) { return (uintptr_t)_dyld_get_image_header(0); }
+
+int plat_exe_path(char *out, size_t cap) {
+    uint32_t size = cap > UINT32_MAX ? UINT32_MAX : (uint32_t)cap;
+    return size && !_NSGetExecutablePath(out, &size);
+}

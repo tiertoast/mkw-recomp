@@ -175,6 +175,7 @@ void dg_done(RtThread *t) {
 // Once per long DG_GAME or DG_HOST wait: where the owner's host thread runs (module and offset), its latest SVC and
 // its guest lr. Holding G; the owner is resumed before anything that could take a lock it holds.
 void dg_sample(RtThread *t) {
+    if (!KERN_HAS_INTERRUPT) return;
     RtThread *o = t->target;
     if (!o || o->cur_core < 0 || !o->hthr || g_dg_samples >= DG_SAMPLES) return;
     uint64_t rip, rsp;

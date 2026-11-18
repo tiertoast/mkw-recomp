@@ -73,10 +73,11 @@ static void fiber_switch_to(RtThread *t, const Cpu *from, Fiber *to) {
     }
     Cpu *dst = to ? to->cpu : t->cpu;
     if (to) {
-        if (to->state == F_DONE) rt_fatal("SwitchToFiber(%#llx): the fiber has finished", (unsigned long long)to->addr);
         int idle = 0;
         if (!__atomic_compare_exchange_n(&to->running, &idle, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
             rt_fatal("SwitchToFiber(%#llx): the fiber is running", (unsigned long long)to->addr);
+        // Acquire the state published when the previous pthread finished switching off this stack.
+        if (to->state == F_DONE) rt_fatal("SwitchToFiber(%#llx): the fiber has finished", (unsigned long long)to->addr);
         if (to->state == F_NEW) {
             dst->sp = (to->stack + to->size) & ~15ull;
             to->state = F_STARTED;

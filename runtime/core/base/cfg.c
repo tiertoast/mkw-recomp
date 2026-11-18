@@ -133,7 +133,12 @@ static const CfgMeta metas[] = {
     {"MODS_PLAYED", "", NULL, LIVE},   // the mods of the last start: a new set backs the save up first (launcher)
     {"GAME_DIR", "", NULL, RESTART},   // unset: beside the executable; the launcher remembers the selection there
     // Advanced: scheduling
-    {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "1", "0|1", RESTART},
+#ifdef __APPLE__
+    {"ASYNC_PREEMPT", "2", "0|2", RESTART},
+#else
+    {"ASYNC_PREEMPT", "1", "0|1|2", RESTART},
+#endif
+    {"REPLAY_ASYNC", "1", "0|1", RESTART},
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART},
     // shaders and pipelines
     {"PIPE_WAIT", "default", "default|draw", RESTART}, {"PIPE_SKIP", "fullscreen", "strict|any|fullscreen", RESTART},

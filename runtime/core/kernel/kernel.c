@@ -288,7 +288,7 @@ static void thread_finish(RtThread *t) {
     lock();
     core_put(t);
     acct(t, S_OFF);
-    if (t->hthr) plat_intr_free(t->hthr);   // no waiter interrupts a thread without a core
+    if (KERN_HAS_INTERRUPT && t->hthr) plat_intr_free(t->hthr);   // no waiter interrupts a thread without a core
     t->hthr = NULL;
     t->exited = 1;
     wake_sync_waiters();
@@ -303,7 +303,7 @@ __attribute__((noreturn)) void exit_now(RtThread *t) { longjmp(t->exit_jmp, 1); 
 
 // The calling host thread, for ap_try (MKW_ASYNC_PREEMPT) and dg_sample (MKW_CORE_DIAG).
 static PlatIntr *ap_open_self(void) {
-    if (!cores_enabled() || (!g_ap_int && g_diag <= 0)) return NULL;
+    if (!cores_enabled() || !KERN_HAS_INTERRUPT || (!g_ap_int && g_diag <= 0)) return NULL;
     PlatIntr *h = plat_intr_self();
     if (!h) rt_log("kernel: no interruption handle for this thread: it is not preempted asynchronously");
     return h;

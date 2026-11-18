@@ -201,8 +201,8 @@ static void core_take_gated(RtThread *t) {
     int sampled = 0;
     while (t->cur_core < 0) {
         uint32_t ms = 0;   // 0: until signalled
-        if (g_ap_int && ap_try(t) != AP_NONE) ms = 1;   // the owner keeps its core: again in a millisecond
-        int sample = g_diag > 0 && !sampled && (t->dg_cls == DG_GAME || t->dg_cls == DG_HOST);
+        if (KERN_HAS_INTERRUPT && g_ap_int && ap_try(t) != AP_NONE) ms = 1;   // the owner keeps its core: again in a millisecond
+        int sample = KERN_HAS_INTERRUPT && g_diag > 0 && !sampled && (t->dg_cls == DG_GAME || t->dg_cls == DG_HOST);
         if (sample && !ms) ms = 2;
         if (ms) plat_cond_wait_ms(&t->cv, &G, ms);
         else plat_cond_wait(&t->cv, &G);
@@ -292,6 +292,7 @@ void rt_spin_gate(Cpu *c, uint64_t head) {
     if (!g_spin_on || t->cur_core < 0 || now - sw_t0 < g_spin_handoff_ns ||
         !__atomic_load_n(&g_core_wait, __ATOMIC_RELAXED))   // a racy look: a waiter missed now is seen at the next pass
         return;
+    if (!KERN_HAS_INTERRUPT && ap_disabled(t)) return;   // polling cannot release a protected guest core
     t->sp_ho++;
     int away = kern_core_away();
     plat_yield();

@@ -3,6 +3,7 @@
 | File | What it is |
 |---|---|
 | `darwin_thread.c`, `darwin_sync.c` | Native pthread handles, monotonic time, shared/exclusive locks and condition variables on public Darwin address waits |
+| `darwin_fiber.c`, `darwin_switch.S`, `darwin_context.h` | Guarded movable x86_64 fiber stacks, Mach-O context switch and same-fiber nonlocal guest returns |
 | `darwin_mem.c` | Mach VM exact reservations, page-state ledger, demand-zero commit and atomic replacement on decommit. Protected accesses follow the OS fault disposition |
 | `darwin_process.c` | Process environment and re-execution for the bounded ASLR retry |
 | `darwin_file.c` | Read-only file and module-ID discovery for the Darwin loader |

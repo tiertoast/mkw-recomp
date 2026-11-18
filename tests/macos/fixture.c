@@ -1,12 +1,26 @@
 // Run through the real loader, linker tables, seal, dispatch and module ABI without any game input.
 #include "host.h"
 #include "gamelib.h"
+#include "cfg.h"
 #include "platform/platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 const char *fixture_dir;
+const char *cfg_game_dir(void) { return fixture_dir; }
+const RtGame *rt_game_builtin(void) { return NULL; }
+const char *cfg_get(const char *name) { return getenv(name); }
+volatile uint32_t prof_render_tid;
+int kern_host_track;
+
+void kern_checkpoint(void) { abort(); }
+int kern_core_away(void) { abort(); }
+void kern_core_back(int *away) { (void)away; abort(); }
+void kern_host_left(void *t) { (void)t; abort(); }
+void rt_spin_gate(Cpu *c, uint64_t head) { (void)c; (void)head; abort(); }
+void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) { (void)c; (void)imm; (void)pc; abort(); }
+
 static void first(Cpu *c) { c->x[0]++; }
 HOST_OVERRIDE("duplicate", first);
 
