@@ -212,6 +212,12 @@ static inline void *plat_casp(void *volatile *p, void *xchg, void *cmp) {
 
 // ---- virtual memory: ranges reserved at fixed addresses below 2^39, their pages committed, decommitted and protected
 // at 4 KiB granularity.
+// Darwin leaves protection faults to the OS. Callers must not arm optional watches or register retry hooks there.
+#ifdef __APPLE__
+#define PLAT_CAN_RETRY_FAULT 0
+#else
+#define PLAT_CAN_RETRY_FAULT 1
+#endif
 enum { PLAT_PROT_NONE, PLAT_PROT_READ, PLAT_PROT_RW };
 enum { PLAT_MEM_FREE = -2, PLAT_MEM_RESERVED = -1 };   // plat_mem_state besides PLAT_PROT_* for committed pages
 // Reserves [addr, addr + n) inaccessible, exactly there: 0 when any of it is taken. watch: writes to its pages are

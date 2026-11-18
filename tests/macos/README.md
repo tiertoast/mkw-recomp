@@ -33,20 +33,63 @@ only registrations with targeted whole-archive linkage. Registry construction/se
 
 | File | Test |
 |---|---|
-| `CMakeLists.txt` | Builds fixtures with dead stripping, links the versioned host ABI, and registers the four local CTest cases |
+| `CMakeLists.txt` | Builds fixtures with dead stripping, links the versioned host ABI, and registers the native CTest cases |
 | `fixture.c`, `declarations.cpp` | Concurrent module discovery, duplicate-name precedence, three real registry tables across C and an archived C++ object, seal, synthetic address and dispatch |
 | `module.c` | One synthetic address calls through `rt_sj_owner`, re-enters its C body and dispatches to the registered host function |
 | `empty.c` | Empty linked override and observer table bounds with the production lookup functions |
 | `check.py` | Mach-O slices, two-level imports, exported symbols, section presence, relocation, readiness and rejection of wrong architecture, ABI, ID or entry |
 | `threads.c` | Thread names and stack, timed join followed by join, detach, event and condition signaling, shared/exclusive contention, recursive ownership and once |
-| `support.c` | Fixture configuration, diagnostics and anonymous pages for the dispatch table. Entry into an unavailable scheduler or service fails the process |
+| `support.c` | Fixture configuration and diagnostics. The dispatch table uses native Darwin VM. Entry into an unavailable scheduler or service fails the process |
 
 A public thread handle has one owner. Join and detach consume the handle. A timed-out join keeps it valid. Timed
 join tests completion of the entry function, so subsequent pthread TLS destructor work consumes none of its timeout.
 The inline Darwin lock and condition state supports zero initialization and the common API's object lifetime without
 a heap allocation or a destroy operation. Timed waits use a monotonic clock.
 
-The full runtime still needs guest VM reservations and coherence, fibers and scheduler integration, the general
-Darwin filesystem/process/service and diagnostic backends, and game renderer/shader/setup integration. G2-A builds
-only the named native sources. The fixture provides no guest kernel, VM backend, shader translator bootstrap or
-generated game module.
+## Guest VM
+
+`vm.c` links the actual guest layout, heap, physical mapping, stack move and QueryMemory code. Its configuration
+and single synthetic module are supplied by `vm_layout.c`, shared with the Vulkan fixture. A foreign Mach page occupies part of the first low-window candidate.
+A separate run forces the fixed module collision through the runtime's re-exec path. The test exercises the page-state
+boundaries, RSS across a heap commit/touch/decommit, repeated commits, zero-fill, eight concurrent faults at distinct
+bytes of the same read-only page and eight workers repeatedly cycling page states. `faults.py` additionally checks the
+OS signal from each forbidden access in its own process. The signal observer used by the eight workers exists only
+in the test executable.
+
+Darwin reserves at the requested address with no overwrite, initial protection NONE and maximum RW. Each mapping
+lives until process exit. A mutex serializes the ownership ledger and the Mach operations. Decommit replaces only a
+subrange of one owned guest reservation with fresh anonymous NONE pages. A repeated commit preserves its data.
+A physical guest alias uses the runtime's existing mapping rules. Moving an alias page to a stack copies its bytes,
+makes the source inaccessible and copies the bytes back on unmap.
+
+Darwin leaves guest protection faults to the installed OS disposition. `PLAT_CAN_RETRY_FAULT` is zero. Freeze,
+read traps and diagnostic write watches therefore never arm pages. `plat_mem_poke` returns zero, including on
+a writable address. `plat_mem_peek` uses a checked Mach read with the current protection. Nonempty dirty and
+population queries with output capacity return `UINT64_MAX` for unknown. Consumers must upload the entire relevant
+range, or decline facilities that require a populated-page census. Demand paging supplies zero on first access.
+The optional placed Vulkan mapping experiment cannot take ownership of a Darwin guest reservation.
+
+`vm_vulkan.c` is an opt-in LunarG/NullMoth NVK buffer fixture. It requests Khronos synchronization validation,
+checks the driver ID, stages a full guest range to a device-local buffer, changes a word on the GPU, waits for its
+fence and checks every readback byte. Copying the known GPU-written word back also preserves the post-submit
+CPU update to its neighbouring byte. It reports the memory properties of the staging allocations. This test reserves the full guest layout after loading NVK, maps its staging source with
+`mem_map_physical` and checks the runtime dirty-query and read-trap fallbacks. Full renderer shadow merging and sparse residency need their own integration tests.
+
+```sh
+uv run tools/build/build.py --target macos-x86_64 --out build/g2b
+cmake -S tests/macos -B build/g2b -DMKW_TEST_NVK=ON -DVULKAN_PREFIX=/usr/local
+cmake --build build/g2b
+ctest --test-dir build/g2b -V
+ctest --test-dir build/g2b -R '^darwin-vm$' --repeat until-fail:30
+env CFLAGS=-fsanitize=address,undefined CXXFLAGS=-fsanitize=address,undefined LDFLAGS=-fsanitize=address,undefined \
+  uv run tools/build/build.py --target macos-x86_64 --out build/g2b-asan
+cmake -S tests/macos -B build/g2b-asan -DMKW_TEST_NVK=ON
+cmake --build build/g2b-asan
+env UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir build/g2b-asan -V
+env CFLAGS=-fsanitize=thread CXXFLAGS=-fsanitize=thread LDFLAGS=-fsanitize=thread \
+  uv run tools/build/build.py --target macos-x86_64 --out build/g2b-tsan
+ctest --test-dir build/g2b-tsan -R '^darwin-vm$' --repeat until-fail:10
+```
+
+Further gates cover fibers, scheduler integration, filesystem and process services, crash diagnostics, renderer
+integration and setup of generated modules.

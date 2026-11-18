@@ -112,8 +112,8 @@ also needs the Adreno workarounds in `runtime/gfx/vk`, which come separately.
 
 ## macOS x86_64 foundations
 
-On a native x86_64 Mac, `--target macos-x86_64` builds the G2-A foundations in `build/macos-x86_64-g2a`.
+On a native x86_64 Mac, `--target macos-x86_64` builds the Darwin foundations in `build/macos-x86_64-g2a`.
 The entry point selects the Apple Clang drivers and macOS SDK with `xcrun`. CMake 3.24+ and Ninja must be on PATH.
 This target links libSystem and libc++. Its synthetic executable exercises the runtime registry, dispatcher,
-module loader and threading primitives. See the [test commands and ABI contract](../../tests/macos/README.md).
+module loader, threading primitives and Mach virtual memory. See the [test commands and ABI contract](../../tests/macos/README.md).
 The SDL/Vulkan [G1 probe](../macos-probe/README.md) has its own build target.

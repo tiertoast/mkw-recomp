@@ -143,7 +143,7 @@ static int freeze_locked(uint64_t r) {
 }
 
 int mem_freeze(uint64_t a) {
-    if ((a & (FRZ_SIZE - 1)) || !watched(a, FRZ_SIZE)) return 0;
+    if (!PLAT_CAN_RETRY_FAULT || (a & (FRZ_SIZE - 1)) || !watched(a, FRZ_SIZE)) return 0;
     uint64_t r = a >> FRZ_SHIFT;
     int ok = 0;
     plat_mutex_lock(&frz_lock);
@@ -199,7 +199,7 @@ static void fill_locked(uint64_t a, int why) {
 }
 
 static void untrap_range_locked(uint64_t a, uint64_t n) {
-    if (!ntrapped && !mem_early_pages && !mem_base_pages()) return;
+    if (!PLAT_CAN_RETRY_FAULT || (!ntrapped && !mem_early_pages && !mem_base_pages())) return;
     uint64_t end = a + n < RT_ADDRESS_LIMIT ? a + n : RT_ADDRESS_LIMIT;
     for (uint64_t p = a & ~(PAGE - 1); p < end && (ntrapped || mem_early_pages || mem_base_pages()); p += PAGE)
         if (trapped[p / PAGE] == 2) mem_early_release_locked(p, 0);
@@ -208,6 +208,7 @@ static void untrap_range_locked(uint64_t a, uint64_t n) {
 }
 
 int mem_trap_init(void) {   // memory_int.h
+    if (!PLAT_CAN_RETRY_FAULT) return 0;
     if (trap_ok < 0) {
         uint8_t probe;
         trapped = plat_mem_alloc(RT_ADDRESS_LIMIT / PAGE);
@@ -219,8 +220,7 @@ int mem_trap_init(void) {   // memory_int.h
 }
 
 int mem_trap(uint64_t a, uint64_t n, const void *src) {
-    if (!n || !watched(a, n)) return 0;
-    if (!mem_trap_init()) return 0;
+    if (!PLAT_CAN_RETRY_FAULT || !n || !watched(a, n) || !mem_trap_init()) return 0;
     const uint8_t *s = src;
     uint64_t lo = (a + PAGE - 1) & ~(PAGE - 1), hi = (a + n) & ~(PAGE - 1);
     plat_mutex_lock(&frz_lock);
@@ -468,7 +468,7 @@ void mem_init(void) {
         if (reserve_at(at, ALIAS_SIZE, 1)) alias = at;
     if (!alias) reexec_or_fail("a 64 GiB alias region below 2^39");
 
-    plat_mem_fault_hook(thaw_fault);   // before the crash handler
+    if (PLAT_CAN_RETRY_FAULT) plat_mem_fault_hook(thaw_fault);   // before the crash handler
     alias_pages = calloc(ALIAS_PAGES, 1);
     if (!alias_pages) rt_fatal("memory: cannot allocate the alias page map");
     // mkw.ini is read here, once the address space is claimed and before the first setting: the pool size below
@@ -489,7 +489,7 @@ void mem_init(void) {
     const char *lz = cfg_get("MKW_LAZY_COMMIT");
     lazy = !lz || atoi(lz) != 0;
 #endif
-    plat_mem_lazy_hook(lazy_fault);   // a no-op on Linux
+    if (PLAT_CAN_RETRY_FAULT) plat_mem_lazy_hook(lazy_fault);   // a no-op on Linux
 }
 
 const RtGuestLayout *mem_layout(void) { return &L; }
