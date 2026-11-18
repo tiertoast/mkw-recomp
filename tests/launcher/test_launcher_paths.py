@@ -64,7 +64,7 @@ def paths_probe(tmp_path_factory: pytest.TempPathFactory) -> Path:
     (folder / "launcher_paths.inc").write_text("".join(snippets), encoding="utf-8")
     includes = [ROOT / p for p in ("runtime", "runtime/cpu", "runtime/core/base", "runtime/core/boot",
                                   "runtime/ui/launcher")]
-    flags = []
+    flags = ["-Wl,-dead_strip"] if sys.platform == "darwin" else []
     if os.name == "nt":
         mingw = shutil.which("gcc")
         for p in ("C:/msys64/mingw64/bin/gcc.exe", "C:/msys64/ucrt64/bin/gcc.exe"):

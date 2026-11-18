@@ -5,6 +5,7 @@ Boot: the program entry point, the game code tables, module loading, patches and
 | File | What it is |
 |---|---|
 | `main.c`, `boot.c` | Program entry (`MKW_ALLOW_PTRACE=1` lets gdb attach; before it, the first constructor tells a CPU without AVX2 so in a box) and boot sequence; `--boot` stops at MKW's first NVN call (1.0.0 `main+0xcf3a5c`, 1.8.0 `main+0xdd07c8`) |
+| `darwin_abi.h`, `darwin_abi.c` | Versioned Mach-O host ABI, with an immutable table of executable-local service implementations bound before module load |
 | `gamelib.c`, `gamelib.h` | Game code tables (modules, functions, ExeFS hashes, patches): linked into `build/mkw`, or loaded from `mkwgame.so`/`mkwgame.dll` in the selected installation folder in the player's build (`build.py --dist`), with its header id |
 | `loader.c` | Loads the modules at their addresses, relocations, import binding, constructor flag (with Switch 2's `PACIBSP`); `--probe-loader` compares against MKW 1.0.0's numbers (another version's are printed only) |
 | `game.c` | MKW's own: the game clock (`frame_step_*`, counts presents; totk-pc-recomp takes it from `frame_rate.c` and its patches); the world clock of A/B runs (`MKW_AB`) counts from the `MKW_SEQ_UNTIL` event; the frame rate setting (`MKW_FPS` auto/game/60/30/20/15: the game's present interval, through its frame object's vtable slot) and the `game: speed` line every 5 s |

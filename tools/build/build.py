@@ -10,6 +10,8 @@ code's tables (runtime/core/boot/gamelib.h: module layout, function tables, the 
 game copy, patch sets); build/obj/rt/defaults.c the default game paths; build/obj/rt/i18n/ the menu texts
 of every language, from i18n/ui/*.po (tools/i18n/catalog.py).
 
+--target macos-x86_64 builds the independent Darwin foundations and synthetic Mach-O modules (tests/macos).
+
 --target windows builds build/mkw.exe with llvm-mingw and the MSYS2 UCRT64 libraries that tools/build/windeps.py puts
 in build/win (totk-pc-recomp's --toolchain build: its LLVM_LINK_LIBS), cross-compiled from Linux or on Windows itself,
 where it is the only target and ninja comes from PATH or else MSYS2 UCRT64 (C:/msys64/ucrt64/bin, MSYS2_UCRT64_BIN).
@@ -139,7 +141,7 @@ def mem_total_gb() -> float:
 def runtime_sources(target: Target) -> list[Path]:
     """Every runtime .c/.cpp of the target. Linux: no Win32 file (*_win.*, platform/win32*.c). Windows: no
     platform/linux*.c."""
-    srcs = [*RUNTIME.rglob("*.c"), *RUNTIME.rglob("*.cpp")]
+    srcs = [p for ext in ("*.c", "*.cpp") for p in RUNTIME.rglob(ext) if not p.stem.startswith("darwin_")]
     if target is LINUX:
         return sorted(p for p in srcs if not p.stem.endswith("_win") and not p.stem.startswith("win32"))
     return sorted(p for p in srcs if not p.stem.startswith("linux"))
@@ -360,7 +362,8 @@ def windows_host_ninja(text: str) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--gen", type=Path, default=ROOT / "build/generated")
-    ap.add_argument("--target", choices=("linux", "windows"), default="linux")
+    ap.add_argument("--target", choices=("linux", "windows", "macos-x86_64"),
+                    default="macos-x86_64" if sys.platform == "darwin" else "linux")
     ap.add_argument("--arch", choices=tuple(ARCH_FLAGS), default=ARCH, help="Linux: the CPU (default: this machine's)")
     ap.add_argument("--out", type=Path, help="object directory (default build/obj, build/obj-win for windows)")
     ap.add_argument(
@@ -388,6 +391,15 @@ def main() -> None:
         help="runtime with frame pointers: perf call graphs (-g) of where threads block, e.g. -e cs",
     )
     args = ap.parse_args()
+    if args.target == "macos-x86_64":
+        if sys.platform != "darwin" or HOST_ARCH != "x86_64" or args.arch != "x86_64":
+            ap.error("macos-x86_64 requires a native x86_64 Darwin toolchain")
+        if args.dist or args.runtime_only or args.sysroot:
+            ap.error("macos-x86_64 currently builds the standalone foundations target only")
+        from darwin import build_foundations
+
+        build_foundations(ROOT, args, game_id(), RT_EXPORTS)
+        return
     # Absolute, not resolved (game/ is a link): ninja puts $in in each command and ccache hashes the input's path, so a
     # relative --gen next to the absolute default rebuilt all 623 objects for real on every switch (16/11/2026).
     for name in ("gen", "exefs", "romfs", "out"):

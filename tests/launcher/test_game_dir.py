@@ -8,6 +8,7 @@ Usage: uv run pytest tests/launcher/test_game_dir.py
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,8 @@ def game_dir_probe(tmp_path_factory: pytest.TempPathFactory) -> Path:
     exe = tmp_path_factory.mktemp("game-dir") / "probe"
     inc = [f"-I{ROOT / 'runtime'}", f"-I{ROOT / 'runtime/cpu'}", f"-I{ROOT / 'runtime/core/base'}",
            f"-I{ROOT / 'runtime/core/boot'}"]
-    subprocess.run([cc, *inc, str(ROOT / "tests/launcher/t_game_dir.c"), str(ROOT / "runtime/core/base/cfg.c"),
+    flags = ["-Wl,-dead_strip"] if sys.platform == "darwin" else []
+    subprocess.run([cc, *flags, *inc, str(ROOT / "tests/launcher/t_game_dir.c"), str(ROOT / "runtime/core/base/cfg.c"),
                     str(ROOT / "runtime/core/base/sysinfo_log.c"),
                     str(ROOT / "runtime/core/boot/gamelib.c"), "-o", str(exe)], check=True)  # fmt: skip
     return exe
@@ -47,7 +49,7 @@ def launcher(game_dir_probe: Path, tmp_path: Path) -> Path:
 def installation(folder: Path, volume: int = 80) -> Path:
     folder.mkdir()
     (folder / "mkw.ini").write_text(f"romfs = /dump ñ/romfs\nvolume = {volume}\n")
-    (folder / "mkwgame.so").touch()  # readiness checks the id without loading code, as the launcher does
+    (folder / ("mkwgame.dylib" if sys.platform == "darwin" else "mkwgame.so")).touch()  # readiness checks the id without loading code, as the launcher does
     (folder / "mkwgame.id").write_text("dev")
     return folder
 
@@ -117,12 +119,20 @@ def test_selection_preserves_whitespace(launcher: Path, tmp_path: Path, ending: 
 
 
 @pytest.mark.parametrize("size", [1155, 2048])
-def test_rejected_directory_does_not_replace_selection(launcher: Path, tmp_path: Path, size: int) -> None:
+def test_rejected_directory_does_not_replace_selection(
+    launcher: Path, tmp_path: Path, size: int, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     game = installation(tmp_path / "Current")
     probe(launcher, "select", str(game))
     selector = (launcher.parent / "mkw.ini").read_bytes()
     long_path = nested_path(tmp_path, size)
-    long_path.mkdir(parents=True)
+    # Darwin limits a single pathname argument to 1024 bytes. Create the same real directory
+    # component by component, then pass the entire overlong string to the selector under test.
+    with monkeypatch.context() as cwd:
+        cwd.chdir(tmp_path)
+        for component in long_path.relative_to(tmp_path).parts:
+            os.mkdir(component)
+            cwd.chdir(component)
     result = probe(launcher, "select", str(long_path))
     assert result["selected"] == "0" and result["invalid"] == "1"
     assert (launcher.parent / "mkw.ini").read_bytes() == selector

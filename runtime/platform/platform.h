@@ -132,8 +132,14 @@ void plat_sleep_ms(uint32_t ms);          // coarse sleep: the scheduler's granu
 // ---- locks and condition variables. A PlatMutex is a reader-writer lock taken exclusively (plat_mutex_lock) or
 // shared (plat_mutex_lock_shared), not recursive, like Windows' SRW lock it is on Windows. Zero-initialised storage is
 // a valid unlocked lock and an empty condition variable (PLAT_MUTEX_INIT / PLAT_COND_INIT spell it).
+#ifdef __APPLE__
+// Inline words for Darwin address waits. Zero-filled objects require no resource destruction.
+typedef struct { uint64_t state; } PlatMutex;
+typedef struct { uint64_t sequence; } PlatCond;
+#else
 typedef struct { void *p; } PlatMutex;
 typedef struct { void *p; } PlatCond;
+#endif
 #define PLAT_MUTEX_INIT {0}
 #define PLAT_COND_INIT {0}
 void plat_mutex_init(PlatMutex *m);
