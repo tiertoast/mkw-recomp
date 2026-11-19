@@ -10,7 +10,7 @@ code's tables (runtime/core/boot/gamelib.h: module layout, function tables, the 
 game copy, patch sets); build/obj/rt/defaults.c the default game paths; build/obj/rt/i18n/ the menu texts
 of every language, from i18n/ui/*.po (tools/i18n/catalog.py).
 
---target macos-x86_64 builds the independent Darwin foundations and synthetic Mach-O modules (tests/macos).
+--target macos-x86_64 builds the Darwin foundations (tests/macos), or the native runtime with --runtime-only.
 
 --target windows builds build/mkw.exe with llvm-mingw and the MSYS2 UCRT64 libraries that tools/build/windeps.py puts
 in build/win (totk-pc-recomp's --toolchain build: its LLVM_LINK_LIBS), cross-compiled from Linux or on Windows itself,
@@ -372,7 +372,7 @@ def main() -> None:
     )  # fmt: skip
     ap.add_argument(
         "--runtime-only", action="store_true",
-        help="with --dist: the runtime alone (the release and the CI), no generated C or game copy needed",
+        help="the runtime alone, no generated C or game copy (add --dist on Linux and Windows)",
     )  # fmt: skip
     ap.add_argument("--exefs", type=Path, default=GAME / "exefs")
     ap.add_argument("--romfs", type=Path, default=GAME / "romfs")
@@ -394,8 +394,29 @@ def main() -> None:
     if args.target == "macos-x86_64":
         if sys.platform != "darwin" or HOST_ARCH != "x86_64" or args.arch != "x86_64":
             ap.error("macos-x86_64 requires a native x86_64 Darwin toolchain")
-        if args.dist or args.runtime_only or args.sysroot:
-            ap.error("macos-x86_64 currently builds the standalone foundations target only")
+        if args.sysroot or (args.dist and not args.runtime_only):
+            ap.error("macos-x86_64 supports the foundations or --runtime-only")
+        if args.runtime_only:
+            from darwin import build_runtime
+
+            sources = sorted(
+                p
+                for ext in ("*.c", "*.cpp", "darwin_*.S")
+                for p in RUNTIME.rglob(ext)
+                if not p.stem.startswith(("linux", "win32"))
+                and not p.stem.endswith("_win")
+                and p != RUNTIME / "core/boot/darwin_abi.c"  # belongs exclusively to libmkw-host
+            )
+            build_runtime(
+                ROOT,
+                args,
+                game_id(),
+                RT_EXPORTS,
+                sources,
+                defaults_glue(args.exefs, args.romfs, True),
+                catalog.generate,
+            )
+            return
         from darwin import build_foundations
 
         build_foundations(ROOT, args, game_id(), RT_EXPORTS)

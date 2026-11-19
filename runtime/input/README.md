@@ -11,6 +11,7 @@
 | `dsu.c`, `dsu.h` | Cemuhook / DSU (DualShock UDP) motion client (`MKW_DSU`, off by default; `MKW_DSU_SERVER`, `MKW_DSU_SLOT`): a DSU server's gyro and accelerometer for a gamepad whose driver gives none, such as an XInput pad (#435) |
 | `switch2_proto.h` | The Switch 2 controllers' Bluetooth LE protocol (Pro Controller 2, Joy-Con 2: GATT ids, handshake, reports, stick calibration, rumble, pairing), from seedds/mkw-neo (MIT) with our button bits; checked by `tests/runtime/test_switch2.py` |
 | `switch2.h`, `switch2.c` | Switch 2 controllers over Bluetooth LE (`MKW_SWITCH2`, off by default; SDL has them over USB only): the session on top of a transport (identity, pairing, calibration, features, player lights, rumble), each pad a virtual SDL gamepad with its gyro, so players, layout and rumble work as for any gamepad |
+| `darwin_switch2.m` | CoreBluetooth transport for opt-in Switch 2 input. Hold Sync for a session without bonding |
 | `linux_switch2.c` | Its Linux transport: BlueZ over the system D-Bus, libdbus-1 loaded at run time; `MKW_SWITCH2=2` logs each advertising device once |
 | `switch2_win.c` | Its Windows transport: WinRT through its C ABI (advertisement watcher, `BluetoothLEDevice`, GATT), its events queued for the transport's thread; `MKW_SWITCH2=2` as on Linux |
 

@@ -5,8 +5,13 @@
 | `darwin_thread.c`, `darwin_sync.c` | Native pthread handles, monotonic time, shared/exclusive locks and condition variables on public Darwin address waits |
 | `darwin_fiber.c`, `darwin_switch.S`, `darwin_context.h` | Guarded movable x86_64 fiber stacks, Mach-O context switch and same-fiber nonlocal guest returns |
 | `darwin_mem.c` | Mach VM exact reservations, page-state ledger, demand-zero commit and atomic replacement on decommit. Protected accesses follow the OS fault disposition |
-| `darwin_process.c` | Process environment and re-execution for the bounded ASLR retry |
-| `darwin_file.c` | Read-only file and module-ID discovery for the Darwin loader |
+| `darwin_process.c` | Process identity, self-spawn and re-exec, randomness and dyld lookup |
+| `darwin_time.c` | Wall time and standard offset through libc, system zone and preferences through CoreFoundation |
+| `darwin_crash.c` | Alternate signal stacks and terminal diagnostics for faults inside the executable |
+| `darwin_load.c` | Mach CPU and memory counters and optional IOKit GPU statistics |
+| `darwin_ipc.c` | Local stream sockets with nonblocking connect and receive |
+| `darwin_desktop.c` | SDL clipboard, Finder URLs, CoreText outline fonts and executable desktop shortcuts |
+| `darwin_file.c` | Darwin file I/O, append logging, file locks, atomic replacement and save filesystem operations |
 | `platform.h` | The operating system interface the rest of the runtime uses |
 | `linux.c`, `linux_int.h` | Linux: threads, preemption through signals, fibers; the header is what the `linux_*.c` parts share |
 | `linux_sync.c` | Linux: clock, locks and condition variables on futex |

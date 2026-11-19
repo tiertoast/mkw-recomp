@@ -26,7 +26,7 @@
 // MKW_LAN off (the default) keeps main's stub, a console whose network is down: every socket call -1, errno ENETDOWN,
 // IsInitialized 1, no WSAStartup, so the online menu takes its no-connection path as before (issue #63).
 //
-// eventfd exists only on Linux; Windows answers ENOSYS. In main only gRPC's wakeup_fd_eventfd.cc (main+0x10208c0, the
+// eventfd exists only on Linux; other hosts answer ENOSYS. In main only gRPC's wakeup_fd_eventfd.cc (main+0x10208c0, the
 // online services) calls EventFd*, after its availability check (main+0x1020a30); Pia never does.
 #include <stdint.h>
 #include <stdio.h>
@@ -54,7 +54,9 @@ typedef SOCKET HostSock;
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
+#ifdef __linux__
 #include <sys/eventfd.h>
+#endif
 #include <sys/socket.h>
 #include <unistd.h>
 typedef int HostSock;
@@ -580,11 +582,7 @@ static void ov_poll(Cpu *c) {
 // int EventFd(uint64_t initval, EventFdFlags flags)
 static void ov_eventfd(Cpu *c) {
     LAN_OR_DOWN(c);
-#ifdef _WIN32
-    // ponytail: no eventfd on Windows; only gRPC (online) calls it, see the top. A loopback socket pair if Pia ever does
-    fail(G_ENOSYS);
-    ret_x(c, (uint64_t)-1);
-#else
+#ifdef __linux__
     uint32_t f = (uint32_t)arg_x(c, 1);
     int e = eventfd((unsigned)arg_x(c, 0), (f & B_EFD_SEMAPHORE ? EFD_SEMAPHORE : 0) | EFD_CLOEXEC);
     int nonblock = (f & B_EFD_NONBLOCK) != 0;
@@ -593,6 +591,9 @@ static void ov_eventfd(Cpu *c) {
     if (e < 0) fail(errno);
     else if (fd < 0) close(e), fail(G_EMFILE);
     ret_x(c, (uint64_t)(int64_t)fd);
+#else
+    fail(G_ENOSYS);
+    ret_x(c, (uint64_t)-1);
 #endif
 }
 
@@ -601,7 +602,7 @@ static void ov_eventfd_read(Cpu *c) {
     Slot sl;
     LAN_OR_DOWN(c);
     int ok = !slot_get((int)arg_x(c, 0), &sl), r = -1;
-#ifndef _WIN32
+#ifdef __linux__
     if (ok && (sl.nonblock || wait_readable(sl.s, -1))) {
         r = read(sl.s, arg_p(c, 1), 8) == 8 ? 0 : -1;
         if (r < 0) fail(errno);
@@ -615,7 +616,7 @@ static void ov_eventfd_write(Cpu *c) {
     Slot sl;
     LAN_OR_DOWN(c);
     int ok = !slot_get((int)arg_x(c, 0), &sl), r = -1;
-#ifndef _WIN32
+#ifdef __linux__
     uint64_t v = arg_x(c, 1);
     if (ok) {
         r = write(sl.s, &v, 8) == 8 ? 0 : -1;

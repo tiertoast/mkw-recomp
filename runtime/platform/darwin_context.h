@@ -6,3 +6,6 @@
 typedef struct { uintptr_t rbp, rbx, r12, r13, r14, r15, sp, pc; } DarwinGuestJump;
 int darwin_guest_save(DarwinGuestJump *slot) __attribute__((returns_twice));
 _Noreturn void darwin_guest_resume(const DarwinGuestJump *slot);
+
+// Preserve any alternate signal stack already installed by the thread owner.
+void darwin_crash_stack(void);

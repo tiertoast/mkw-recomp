@@ -2,6 +2,9 @@
 // allocated pthread lock/condition for each one (the platform API has no destroy operation).
 #include "platform.h"
 #include <errno.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
 #include <os/os_sync_wait_on_address.h>
 
 // Readers occupy the low word, writers announce themselves before waiting to drain the readers.
@@ -16,18 +19,54 @@ int plat_mutex_trylock(PlatMutex *m) {
     return __atomic_compare_exchange_n(&m->state, &idle, WRITING, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
 }
 
-void plat_mutex_lock(PlatMutex *m) {
+// Contention profiling is opt-in. Keep the uncontended path free of timers and profiling locks.
+typedef struct { uintptr_t lock, caller; uint64_t ns, count; } LockWait;
+static LockWait waits[256];
+static unsigned wait_count;
+static pthread_mutex_t samples_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t profile_once = PTHREAD_ONCE_INIT;
+static int profile;
+
+static void profile_init(void) {
+    const char *value = getenv("MKW_LOCK_PROF");
+    profile = value && *value && *value != '0';
+}
+
+static uint64_t start_wait(void) {
+    pthread_once(&profile_once, profile_init);
+    return profile ? plat_now_ns() : 0;
+}
+
+static void record_wait(PlatMutex *m, uintptr_t caller, uint64_t start) {
+    uint64_t ns = plat_now_ns() - start;
+    pthread_mutex_lock(&samples_lock);
+    unsigned i = 0;
+    while (i < wait_count && (waits[i].lock != (uintptr_t)m || waits[i].caller != caller)) i++;
+    if (i < sizeof waits / sizeof *waits) {
+        if (i == wait_count) {
+            waits[i] = (LockWait){.lock = (uintptr_t)m, .caller = caller};
+            wait_count++;
+        }
+        waits[i].ns += ns;
+        waits[i].count++;
+    }
+    pthread_mutex_unlock(&samples_lock);
+}
+
+void plat_mutex_lock_from(PlatMutex *m, uintptr_t ra) {
     if (plat_mutex_trylock(m)) return;
+    uint64_t began = start_wait();
     __atomic_fetch_add(&m->state, WAITING, __ATOMIC_RELAXED);
     for (;;) {
         uint64_t state = __atomic_load_n(&m->state, __ATOMIC_RELAXED);
         if ((uint32_t)state) {
             os_sync_wait_on_address(&m->state, state, sizeof state, 0);
         } else if (__atomic_compare_exchange_n(&m->state, &state, state - WAITING + WRITING, 0,
-                                                __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+                                                __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) break;
     }
+    if (began) record_wait(m, ra, began);
 }
-void plat_mutex_lock_from(PlatMutex *m, uintptr_t ra) { (void)ra; plat_mutex_lock(m); }
+void plat_mutex_lock(PlatMutex *m) { plat_mutex_lock_from(m, (uintptr_t)__builtin_return_address(0)); }
 
 void plat_mutex_unlock(PlatMutex *m) {
     __atomic_fetch_sub(&m->state, WRITING, __ATOMIC_RELEASE);
@@ -42,10 +81,13 @@ int plat_mutex_trylock_shared(PlatMutex *m) {
 }
 
 void plat_mutex_lock_shared(PlatMutex *m) {
-    while (!plat_mutex_trylock_shared(m)) {
+    if (plat_mutex_trylock_shared(m)) return;
+    uint64_t began = start_wait();
+    do {
         uint64_t state = __atomic_load_n(&m->state, __ATOMIC_RELAXED);
         if (state >= WRITING - 1) os_sync_wait_on_address(&m->state, state, sizeof state, 0);
-    }
+    } while (!plat_mutex_trylock_shared(m));
+    if (began) record_wait(m, (uintptr_t)__builtin_return_address(0), began);
 }
 
 void plat_mutex_unlock_shared(PlatMutex *m) {
@@ -83,4 +125,33 @@ void plat_cond_signal(PlatCond *c) {
 void plat_cond_broadcast(PlatCond *c) {
     __atomic_fetch_add(&c->sequence, 1, __ATOMIC_RELEASE);
     os_sync_wake_by_address_all(&c->sequence, sizeof c->sequence, 0);
+}
+
+static int longest_first(const void *a, const void *b) {
+    uint64_t x = ((const LockWait *)a)->ns, y = ((const LockWait *)b)->ns;
+    return (x < y) - (x > y);
+}
+
+int plat_lock_report(int holds, char *buf, int size) {
+    if (size <= 0) return 0;
+    buf[0] = 0;
+    if (holds) return 0; // Holder profiling is Linux-specific.
+    LockWait snapshot[sizeof waits / sizeof *waits];
+    pthread_mutex_lock(&samples_lock);
+    unsigned n = wait_count;
+    memcpy(snapshot, waits, n * sizeof *waits);
+    wait_count = 0;
+    pthread_mutex_unlock(&samples_lock);
+    qsort(snapshot, n, sizeof *snapshot, longest_first);
+    int len = 0;
+    uintptr_t base = plat_exe_base();
+    for (unsigned i = 0; i < n && i < 10 && len < size - 1; i++) {
+        LockWait *w = &snapshot[i];
+        int k = snprintf(buf + len, size - len, "%s exe+%#lx from exe+%#lx %.1f ms (%llu)", i ? ";" : "",
+                         (unsigned long)(w->lock - base), (unsigned long)(w->caller - base), w->ns / 1e6,
+                         (unsigned long long)w->count);
+        if (k < 0) break;
+        len += k < size - len ? k : size - len - 1;
+    }
+    return len;
 }

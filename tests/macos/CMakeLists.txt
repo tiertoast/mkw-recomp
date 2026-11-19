@@ -91,3 +91,22 @@ add_test(NAME darwin-fiber-context COMMAND fiber-test)
 add_test(NAME darwin-fiber-guard COMMAND fiber-test guard)
 set_tests_properties(darwin-fiber-context darwin-fiber-guard PROPERTIES TIMEOUT 8)
 set_tests_properties(darwin-fiber-context darwin-fiber-guard darwin-guest-fiber PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(darwin-file-test files.c)
+target_link_libraries(darwin-file-test PRIVATE darwin-platform)
+add_test(NAME darwin-files-and-log COMMAND darwin-file-test files)
+add_test(NAME darwin-atomic-saves COMMAND darwin-file-test saves)
+set_tests_properties(darwin-files-and-log darwin-atomic-saves PROPERTIES TIMEOUT 15)
+
+add_executable(darwin-services-test services.c)
+target_link_libraries(darwin-services-test PRIVATE darwin-platform)
+add_dependencies(darwin-services-test mkw-host)
+add_test(NAME darwin-time-locale COMMAND darwin-services-test time -AppleLanguages "(fr-CA)"
+         -AppleLocale "en_IT@calendar=gregorian")
+add_test(NAME darwin-process-loading COMMAND darwin-services-test process "$<TARGET_FILE:mkw-host>" "argument with spaces")
+set_tests_properties(darwin-time-locale darwin-process-loading PROPERTIES TIMEOUT 12)
+
+add_executable(darwin-backend-test backend.c)
+target_link_libraries(darwin-backend-test PRIVATE darwin-platform)
+add_test(NAME darwin-backend COMMAND darwin-backend-test)
+set_tests_properties(darwin-backend PROPERTIES TIMEOUT 15)

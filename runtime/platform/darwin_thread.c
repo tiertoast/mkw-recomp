@@ -1,10 +1,16 @@
 // Darwin thread handles have two owners. Detaching releases the caller's reference even if the entry has not run yet.
 #include "platform.h"
+#include "darwin_context.h"
 #include <errno.h>
+#include <CoreFoundation/CFNumber.h>
+#include <IOKit/IOKitLib.h>
+#include <cpuid.h>
 #include <mach/mach.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 struct PlatThread {
@@ -28,6 +34,7 @@ static void completed(void *arg) {
 
 static void *start(void *arg) {
     PlatThread *t = arg;
+    darwin_crash_stack();
     if (*t->name) pthread_setname_np(t->name);
     pthread_cleanup_push(completed, t);
     t->fn(t->arg);
@@ -109,3 +116,124 @@ void plat_wait_ns(uint64_t ns) {
 }
 void plat_sleep_ns(uint64_t ns) { plat_wait_ns(ns); }
 void plat_sleep_ms(uint32_t ms) { plat_wait_ns((uint64_t)ms * 1000000u); }
+
+// Darwin's affinity tags express cache-sharing preferences. They cannot enforce a processor mask.
+uint64_t plat_thread_affinity(PlatThread *t, uint64_t mask) { (void)t; (void)mask; return 0; }
+int plat_process_affinity(uint64_t mask) { (void)mask; return 0; }
+void plat_thread_background(void) {} // There is no restricted foreground mask to escape.
+void plat_timer_1ms(void) {} // Mach timed waits require no process-wide resolution request.
+
+uint64_t plat_cpu_fast(void) {
+    unsigned count = plat_cpu_count();
+    return count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+}
+
+static pthread_once_t topology_once = PTHREAD_ONCE_INIT;
+static uint64_t siblings[64], representatives;
+
+static int registry_id(io_registry_entry_t entry, CFStringRef key, int *id) {
+    CFTypeRef value = IORegistryEntryCreateCFProperty(entry, key, NULL, 0);
+    int ok = value && CFGetTypeID(value) == CFNumberGetTypeID() &&
+             CFNumberGetValue(value, kCFNumberIntType, id) && *id >= 0;
+    if (value) CFRelease(value);
+    return ok;
+}
+
+static void read_topology(void) {
+    unsigned physical, logical = plat_cpu_count();
+    size_t size = sizeof physical;
+    if (logical > 64 || sysctlbyname("hw.physicalcpu", &physical, &size, NULL, 0)) return;
+    if (physical == logical) {
+        representatives = plat_cpu_fast();
+        return;
+    }
+    // CPUID leaf B gives the SMT shift in the local APIC ID. IOKit relates that ID to Darwin's CPU number.
+    unsigned shift, count, level, unused;
+    if (!__get_cpuid_count(0xb, 0, &shift, &count, &level, &unused) ||
+        ((level >> 8) & 255) != 1 || !(count & 65535)) return;
+    shift &= 31;
+    io_iterator_t it;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOCPU"), &it)) return;
+    unsigned apic[64];
+    uint64_t seen = 0;
+    io_object_t cpu;
+    while ((cpu = IOIteratorNext(it))) {
+        int index, id;
+        io_registry_entry_t acpi;
+        if (registry_id(cpu, CFSTR("IOCPUNumber"), &index) && (unsigned)index < logical &&
+            !IORegistryEntryGetParentEntry(cpu, kIOServicePlane, &acpi)) {
+            if (registry_id(acpi, CFSTR("processor-lapic"), &id)) {
+                apic[index] = (unsigned)id;
+                seen |= UINT64_C(1) << index;
+            }
+            IOObjectRelease(acpi);
+        }
+        IOObjectRelease(cpu);
+    }
+    IOObjectRelease(it);
+    if (seen != plat_cpu_fast()) return;
+    uint64_t first = 0;
+    for (unsigned i = 0; i < logical; i++) {
+        uint64_t group = 0;
+        for (unsigned j = 0; j < logical; j++) {
+            if (i != j && apic[i] == apic[j]) return;
+            if ((apic[i] >> shift) == (apic[j] >> shift)) group |= UINT64_C(1) << j;
+        }
+        siblings[i] = group;
+        first |= group & -group;
+    }
+    if ((unsigned)__builtin_popcountll(first) == physical) representatives = first;
+}
+
+int plat_cpu_cores(uint64_t *all, uint64_t *first) {
+    pthread_once(&topology_once, read_topology);
+    *all = plat_cpu_fast();
+    *first = representatives;
+    return __builtin_popcountll(*first);
+}
+
+uint64_t plat_cpu_core_of(int cpu) {
+    if ((unsigned)cpu >= 64) return 0;
+    pthread_once(&topology_once, read_topology);
+    return representatives && siblings[cpu] ? siblings[cpu] : UINT64_C(1) << cpu;
+}
+
+// Darwin time-sharing pthreads have a default base priority of 31. Keep all seven levels time-sharing.
+enum { NORMAL_BASE = 31 };
+void plat_thread_set_priority(PlatThread *t, int prio) {
+    struct sched_param p = {.sched_priority = NORMAL_BASE + prio};
+    pthread_setschedparam(t ? t->thread : pthread_self(), SCHED_OTHER, &p);
+}
+
+void plat_thread_priority(int prio) { plat_thread_set_priority(NULL, prio); }
+
+int plat_thread_priority_get(void) {
+    struct sched_param p;
+    int policy;
+    if (pthread_getschedparam(pthread_self(), &policy, &p) || policy != SCHED_OTHER) return PLAT_PRIO_NORMAL;
+    int level = p.sched_priority - NORMAL_BASE;
+    if (level <= PLAT_PRIO_IDLE) return PLAT_PRIO_IDLE;
+    if (level >= PLAT_PRIO_TIME_CRITICAL) return PLAT_PRIO_TIME_CRITICAL;
+    if (level < -2) return PLAT_PRIO_LOWEST;
+    if (level > 2) return PLAT_PRIO_HIGHEST;
+    return level;
+}
+
+int64_t plat_threads_cpu_ns_named(const char *name) {
+    thread_act_array_t threads;
+    mach_msg_type_number_t count;
+    if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) return -1;
+    int64_t sum = -1;
+    for (unsigned i = 0; i < count; i++) {
+        thread_extended_info_data_t info;
+        mach_msg_type_number_t n = THREAD_EXTENDED_INFO_COUNT;
+        if (thread_info(threads[i], THREAD_EXTENDED_INFO, (thread_info_t)&info, &n) == KERN_SUCCESS &&
+            !strcmp(info.pth_name, name)) {
+            if (sum < 0) sum = 0;
+            sum += info.pth_user_time + info.pth_system_time;
+        }
+        mach_port_deallocate(mach_task_self(), threads[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)threads, count * sizeof *threads);
+    return sum;
+}

@@ -72,7 +72,7 @@ static int wait_met(const p_wait_event *w) {   // (an event the table has no roo
     return w->mode == NVN_EVENT_WAIT_MODE_EQUAL ? ev[k].v == w->value : (int32_t)(ev[k].v - w->value) >= 0;
 }
 
-static void signal(const p_signal_event *e) {
+static void signal_event(const p_signal_event *e) {
     int k = ev_slot(e->val);
     if (k >= 0) ev[k].v = e->mode == NVN_EVENT_SIGNAL_MODE_ADD ? ev[k].v + e->value : e->value;
 }
@@ -84,7 +84,7 @@ static const op_hdr *op_at(const uint8_t *p) { return (const op_hdr *)(const voi
 static const uint8_t *follow(const uint8_t *p, const uint8_t *end, int stop) {
     for (; p < end; p += op_at(p)->size) {
         const op_hdr *h = op_at(p);
-        if (h->op == OP_SIGNAL_EVENT) signal(nvn_op_payload(h));
+        if (h->op == OP_SIGNAL_EVENT) signal_event(nvn_op_payload(h));
         else if (h->op == OP_WAIT_EVENT) {
             if (!wait_met(nvn_op_payload(h))) {
                 if (stop) return p;
