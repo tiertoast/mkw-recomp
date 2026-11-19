@@ -146,3 +146,5 @@ ctest --test-dir build/macos-x86_64-g2a -R '^darwin-(time-locale|process-loading
 The time fixture sets its own locale preferences with arguments and checks DST using a process-local TZ.
 The process fixture verifies a re-exec retaining its PID, merged output and its truncation limit, timeout of a
 child with the pipe still open, and system versus explicit-path library lookup.
+
+`backend.c` (`darwin-backend-test`, CTest `darwin-backend`) checks local IPC, pthread priorities and timing, telemetry, and terminal handling of Mach VM protection faults in isolated children.

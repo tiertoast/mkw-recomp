@@ -48,3 +48,11 @@ target_include_directories(mkw PRIVATE ${runtime_includes} "${gen}"
 target_link_libraries(mkw PRIVATE mkw-host SDL3::SDL3 "${VULKAN_LOADER}" "${MKW_COREFOUNDATION}"
   "${OPUS_LIBRARY}" "${VPX_LIBRARY}" "${ZSTD_LIBRARY}")
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/mkwgame.id" CONTENT "${MKW_GAME_ID}")
+
+enable_language(OBJC)
+target_sources(mkw PRIVATE "${rt}/input/darwin_switch2.m")
+set_source_files_properties("${rt}/input/darwin_switch2.m" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+target_link_libraries(mkw PRIVATE "-framework CoreBluetooth" "-framework Foundation" "-framework CoreText" "-framework IOKit")
+set(info_plist "${CMAKE_CURRENT_LIST_DIR}/Info.plist")
+target_link_options(mkw PRIVATE "LINKER:-adhoc_codesign" "LINKER:-sectcreate,__TEXT,__info_plist,${info_plist}")
+set_property(TARGET mkw APPEND PROPERTY LINK_DEPENDS "${info_plist}")

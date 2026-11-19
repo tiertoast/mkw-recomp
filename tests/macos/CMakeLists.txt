@@ -105,3 +105,8 @@ add_test(NAME darwin-time-locale COMMAND darwin-services-test time -AppleLanguag
          -AppleLocale "en_IT@calendar=gregorian")
 add_test(NAME darwin-process-loading COMMAND darwin-services-test process "$<TARGET_FILE:mkw-host>" "argument with spaces")
 set_tests_properties(darwin-time-locale darwin-process-loading PROPERTIES TIMEOUT 12)
+
+add_executable(darwin-backend-test backend.c)
+target_link_libraries(darwin-backend-test PRIVATE darwin-platform)
+add_test(NAME darwin-backend COMMAND darwin-backend-test)
+set_tests_properties(darwin-backend PROPERTIES TIMEOUT 15)

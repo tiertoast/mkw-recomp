@@ -7,6 +7,7 @@
 #include <libproc.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <mach/mach_time.h>
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
@@ -49,12 +50,13 @@ int plat_process_alive(uint32_t pid) {
 }
 
 uint64_t plat_process_uptime_ns(void) {
-    struct proc_bsdinfo info;
-    if (proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &info, sizeof info) != sizeof info) return 0;
-    // proc_pidinfo exposes the process start as a Unix timestamp, in microseconds.
-    uint64_t start = info.pbi_start_tvsec * 1000000000ull + info.pbi_start_tvusec * 1000ull;
-    uint64_t now = clock_gettime_nsec_np(CLOCK_REALTIME);
-    return start && now > start ? now - start : 0;
+    struct rusage_info_v0 info;
+    mach_timebase_info_data_t scale;
+    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V0, (rusage_info_t *)&info) ||
+        mach_timebase_info(&scale) != KERN_SUCCESS) return 0;
+    uint64_t now = mach_absolute_time();
+    if (!info.ri_proc_start_abstime || now < info.ri_proc_start_abstime) return 0;
+    return (__uint128_t)(now - info.ri_proc_start_abstime) * scale.numer / scale.denom;
 }
 
 int plat_random(void *out, size_t n) {
@@ -223,3 +225,5 @@ int plat_run_self(const char *env_name, const char *env_value, char *out, size_t
     free(env);
     return result;
 }
+
+uint64_t plat_process_cpu_ns(void) { return clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID); }

@@ -9,10 +9,11 @@ endforeach()
 find_library(MKW_COREFOUNDATION CoreFoundation REQUIRED)
 
 add_library(darwin-platform STATIC EXCLUDE_FROM_ALL "${rt}/platform/darwin_fiber.c" "${rt}/platform/darwin_switch.S"
-            "${rt}/platform/darwin_file.c" "${rt}/platform/darwin_mem.c"
+            "${rt}/platform/darwin_file.c" "${rt}/platform/darwin_mem.c" "${rt}/platform/darwin_crash.c"
+            "${rt}/platform/darwin_ipc.c" "${rt}/platform/darwin_load.c"
             "${rt}/platform/darwin_process.c" "${rt}/platform/darwin_sync.c" "${rt}/platform/darwin_thread.c"
             "${rt}/platform/darwin_time.c" "${rt}/platform/common.c")
-target_link_libraries(darwin-platform PUBLIC "${MKW_COREFOUNDATION}")
+target_link_libraries(darwin-platform PUBLIC "${MKW_COREFOUNDATION}" "-framework IOKit")
 
 add_library(darwin-kernel STATIC EXCLUDE_FROM_ALL "${rt}/core/kernel/kernel.c" "${rt}/core/kernel/kernel_svc.c"
             "${rt}/core/kernel/kernel_fiber.c" "${rt}/core/kernel/kernel_preempt.c"

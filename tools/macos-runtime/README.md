@@ -13,7 +13,10 @@ CMAKE_PREFIX_PATH="/path/to/frameworks;/path/to/native/deps" VULKAN_PREFIX="/usr
   uv run tools/build/build.py --target macos-x86_64 --runtime-only --jobs 8
 ```
 
-The candidate binary is `build/dist/macos-x86_64/mkw`. Use `--out` for a separate build directory.
-The current build reaches ld with the full runtime source list. The Darwin filesystem, process and crash
-services and the remaining platform backends still have unresolved references. The executable requires those
-backends before it can be linked.
+The executable is `build/dist/macos-x86_64/mkw`. Use `--out` for a separate build directory. The runtime requires
+the adjacent host ABI library and the dependency prefixes used at build time. `Info.plist` embeds the Bluetooth
+usage description in the executable for opt-in Switch 2 controller discovery.
+
+For a controlled startup without a game, use an empty directory for `MKW_GAME_DIR`, set `VK_DRIVER_FILES` to the
+NullMoth NVK manifest, and run `MKW_LAUNCHER_SHOT=3:settings /path/to/mkw --launcher`. The launcher renders the
+settings page, writes `launcher.png` in the current directory and quits.
