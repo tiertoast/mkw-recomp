@@ -97,3 +97,11 @@ target_link_libraries(darwin-file-test PRIVATE darwin-platform)
 add_test(NAME darwin-files-and-log COMMAND darwin-file-test files)
 add_test(NAME darwin-atomic-saves COMMAND darwin-file-test saves)
 set_tests_properties(darwin-files-and-log darwin-atomic-saves PROPERTIES TIMEOUT 15)
+
+add_executable(darwin-services-test services.c)
+target_link_libraries(darwin-services-test PRIVATE darwin-platform)
+add_dependencies(darwin-services-test mkw-host)
+add_test(NAME darwin-time-locale COMMAND darwin-services-test time -AppleLanguages "(fr-CA)"
+         -AppleLocale "en_IT@calendar=gregorian")
+add_test(NAME darwin-process-loading COMMAND darwin-services-test process "$<TARGET_FILE:mkw-host>" "argument with spaces")
+set_tests_properties(darwin-time-locale darwin-process-loading PROPERTIES TIMEOUT 12)

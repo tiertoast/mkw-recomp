@@ -38,6 +38,7 @@ only registrations with targeted whole-archive linkage. Registry construction/se
 | `module.c` | One synthetic address calls through `rt_sj_owner`, re-enters its C body and dispatches to the registered host function |
 | `empty.c` | Empty linked override and observer table bounds with the production lookup functions |
 | `check.py` | Mach-O slices, two-level imports, exported symbols, section presence, relocation, readiness and rejection of wrong architecture, ABI, ID or entry |
+| `services.c` | Darwin clocks, zone and locale, dynamic loading, child capture and re-exec |
 | `files.c` | Positional file I/O, paths, append records, atomic saves, rename and interprocess locks |
 | `threads.c` | Thread names and stack, timed join followed by join, detach, event and condition signaling, shared/exclusive contention, recursive ownership and once |
 | `support.c` | Fixture configuration and diagnostics. The dispatch table uses native Darwin VM. Entry into an unavailable scheduler or service fails the process |
@@ -134,3 +135,14 @@ ctest --test-dir build/macos-x86_64-g2a -R '^darwin-(files-and-log|atomic-saves)
 
 These use a private temporary directory. The save test verifies that an interrupted staged write removes its
 temporary entry, that a competing temporary symlink is preserved, and that the OS releases the lock at process exit.
+
+## Time and process
+
+```sh
+cmake --build build/macos-x86_64-g2a --target darwin-services-test
+ctest --test-dir build/macos-x86_64-g2a -R '^darwin-(time-locale|process-loading)$' --output-on-failure
+```
+
+The time fixture sets its own locale preferences with arguments and checks DST using a process-local TZ.
+The process fixture verifies a re-exec retaining its PID, merged output and its truncation limit, timeout of a
+child with the pipe still open, and system versus explicit-path library lookup.

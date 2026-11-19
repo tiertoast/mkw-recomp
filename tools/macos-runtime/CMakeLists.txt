@@ -45,6 +45,6 @@ endforeach()
 list(REMOVE_DUPLICATES runtime_includes)
 target_include_directories(mkw PRIVATE ${runtime_includes} "${gen}"
   "${VULKAN_INCLUDE}" "${OPUS_INCLUDE}" "${VPX_INCLUDE}" "${ZSTD_INCLUDE}" "${XXHASH_INCLUDE}" "${VMA_INCLUDE}")
-target_link_libraries(mkw PRIVATE mkw-host SDL3::SDL3 "${VULKAN_LOADER}"
+target_link_libraries(mkw PRIVATE mkw-host SDL3::SDL3 "${VULKAN_LOADER}" "${MKW_COREFOUNDATION}"
   "${OPUS_LIBRARY}" "${VPX_LIBRARY}" "${ZSTD_LIBRARY}")
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/mkwgame.id" CONTENT "${MKW_GAME_ID}")
