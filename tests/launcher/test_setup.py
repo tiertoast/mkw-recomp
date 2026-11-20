@@ -613,3 +613,87 @@ def test_keys_ignore_files_the_package_does_not_ship(tmp_path: Path, monkeypatch
     assert shaderstep.shipped(files) == files  # a checkout: no list
     (tmp_path / "FILES").write_text("a.py\n")
     assert shaderstep.shipped(files) == [tmp_path / "a.py"]
+
+
+@pytest.mark.parametrize("endpoint", prepare.STEPS)
+@pytest.mark.parametrize("next_run", [False, True])
+def test_until_inclusive_and_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                    capsys: pytest.CaptureFixture[str], endpoint: str, next_run: bool) -> None:
+    """Drive the real orchestration with synthetic steps; no later background job may escape the endpoint."""
+    game, source = tmp_path / "game", tmp_path / "source"
+    game.mkdir()
+    (source / "exefs").mkdir(parents=True)
+    (source / "romfs").mkdir()
+    (source / "exefs/main").write_bytes(b"synthetic")
+    calls = []
+    monkeypatch.setattr(prepare, "own_children", lambda: None)
+    monkeypatch.setattr(prepare, "hold_lock", lambda _: None)
+    monkeypatch.setattr(prepare.update, "ca_file", lambda: None)
+    monkeypatch.setattr(prepare, "default_cc", lambda *a: ["cc"])
+    monkeypatch.setattr(prepare, "check", lambda *a: (source / "exefs", source / "romfs",
+                                                   SimpleNamespace(name="synthetic", romfs_files=0)))
+    monkeypatch.setattr(prepare, "check_space", lambda *a: None)
+    monkeypatch.setattr(prepare.nextsetup, "lower_priority", lambda: None)
+    for name in ("promote", "remove_old", "seed"):
+        monkeypatch.setattr(prepare.nextsetup, name, lambda *a, n=name: calls.append(n))
+
+    def copy(src, dst, *args):
+        calls.append(dst.name)
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+
+    def generate(exefs, work, *args):
+        calls.append("generate")
+        (work / "generated").mkdir(parents=True, exist_ok=True)
+        (work / "generated/layout.json").write_text("{}")
+
+    def compile_game(*args):
+        calls.append("compile")
+
+    monkeypatch.setattr(prepare, "copy_tree", copy)
+    monkeypatch.setattr(prepare, "generate", generate)
+    monkeypatch.setattr(prepare, "compile_game", compile_game)
+    monkeypatch.setattr(prepare, "shaders", lambda *a: calls.append("shaders"))
+    monkeypatch.setattr(prepare, "warm", lambda *a: calls.append("warm"))
+    monkeypatch.setattr(prepare, "clear_work", lambda *a: calls.append("cleanup"))
+    monkeypatch.setattr(prepare.game_texts, "build_all", lambda *a: None)
+    argv = ["prepare.py", "--game", str(game), "--source", str(source), "--romfs", "copy",
+            "--target", "linux", "--until", endpoint, *(["--next", "--port", "test"] if next_run else [])]
+    monkeypatch.setattr(sys, "argv", argv)
+    original_stderr = sys.stderr
+    try:
+        prepare.main()
+        sys.stderr.close()
+        sys.stderr = original_stderr
+        selected = prepare.STEPS[1:prepare.STEPS.index(endpoint) + 1]
+        assert set(calls) & set(prepare.STEPS) == set(selected)
+        if endpoint != "cleanup":
+            assert not {"promote", "remove_old", "cleanup"} & set(calls)
+        if prepare.STEPS.index(endpoint) < prepare.STEPS.index("shaders"):
+            assert "seed" not in calls
+        dest = game / "setup-next" if next_run else game
+        state = json.loads((dest / "setup-state.json").read_text())
+        assert set(state["done"]) == set(selected) - ({"cleanup"} if next_run else set())
+        assert state["source"] == str(source) and state["romfs_mode"] == "copy"
+        assert bool(state.get("ready")) == (next_run and endpoint == "cleanup")
+        assert (game / "setup-work/generated/layout.json").exists() == ("generate" in selected)
+        calls.clear()
+        # Resume through compile using the persisted source and mode, without repeating finished work.
+        if prepare.STEPS.index(endpoint) <= prepare.STEPS.index("compile"):
+            monkeypatch.setattr(sys, "argv", ["prepare.py", "--game", str(game), "--target", "linux",
+                                              "--until", "compile", *(["--next"] if next_run else [])])
+            prepare.main()
+            sys.stderr.close()
+            sys.stderr = original_stderr
+            assert set(calls) == set(prepare.STEPS[prepare.STEPS.index(endpoint) + 1:5])
+            resumed = json.loads((dest / "setup-state.json").read_text())
+            assert set(resumed["done"]) == set(prepare.STEPS[1:5])
+            assert "done" in capsys.readouterr().out
+    finally:
+        if sys.stderr is not original_stderr:
+            sys.stderr.close()
+            sys.stderr = original_stderr
+
+
+def test_until_rejects_unknown_step(tmp_path: Path) -> None:
+    p = run_prepare("--game", str(tmp_path), "--until", "gameplay")
+    assert p.returncode == 2 and "invalid choice" in (tmp_path / "logs/setup.log").read_text()

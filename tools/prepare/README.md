@@ -5,6 +5,11 @@ The launcher passes `--game DIR` for the chosen installation and `--runtime DIR`
 `setup-state.json`, logs and settings go into the installation. Without `--runtime`, it defaults to `--game`.
 The installation path is made absolute without resolving symlinks or junctions, so setup and warm-up retain the
 directory spelling accepted by the launcher, even when the underlying canonical path exceeds the runtime's limit.
+`--until STEP` stops inclusively at a name in `check`, `exefs`, `romfs`, `generate`, `compile`, `shaders`,
+`warm`, `cleanup` (the default). A partial run keeps its step keys for resumption and does not start background
+work belonging to later steps. For example, `--until compile` leaves generated C and objects in place without
+shader extraction/translation, prewarming, cleanup or update promotion; a partial `--next` is not marked ready.
+
 The compile step writes UTF-8 linker response files with POSIX or Windows quoting as appropriate, preserving literal
 quotes and backslashes in POSIX installation paths instead of treating them as separators.
 
