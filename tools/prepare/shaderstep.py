@@ -58,6 +58,9 @@ def sm86_spec(game: Path, work: Path, cc: list[str]) -> Path:
     for spec in (ROOT / "build/sm86/instructions.json", game / "sm86/instructions.json"):
         if spec.is_file() and spec_loads(spec):
             return spec
+    if sys.platform == "darwin":
+        raise Failed("Darwin setup requires an existing SM86 spec in build/sm86 or the installation's sm86 folder; "
+                     "the NVIDIA tools used to derive it are packaged for Linux and Windows")
     crt = crt_spec(game, cc)  # spec.py links a DLL too on Windows: without it, zig builds its libc there (issue #2)
     run(spec_command(game, work, cc, crt))
     return game / "sm86/instructions.json"

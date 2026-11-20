@@ -13,16 +13,20 @@ def xcrun(*args):
     return subprocess.check_output(["xcrun", "--sdk", "macosx", *args], text=True).strip()
 
 
-def build(root, args, common_id, exports, source, out, extra=()):
-    translated = subprocess.run(["sysctl", "-in", "sysctl.proc_translated"], capture_output=True, text=True, check=True)
-    if translated.stdout.strip() == "1":
-        raise SystemExit("macos-x86_64 requires native execution (Rosetta detected)")
+def game_module_id(root, common_id, exports):
     # Separate module caches by target and the host library's two-level namespace ABI.
     abi = root / "runtime/core/boot/darwin_abi.h"
     fingerprint = hashlib.sha256(b"macos-x86_64/macho/libmkw-host.1\0" + common_id.encode())
     fingerprint.update(abi.read_bytes().replace(b"\r\n", b"\n"))
     fingerprint.update(";".join(exports).encode())
-    module_id = fingerprint.hexdigest()[:16]
+    return fingerprint.hexdigest()[:16]
+
+
+def build(root, args, common_id, exports, source, out, extra=()):
+    translated = subprocess.run(["sysctl", "-in", "sysctl.proc_translated"], capture_output=True, text=True, check=True)
+    if translated.stdout.strip() == "1":
+        raise SystemExit("macos-x86_64 requires native execution (Rosetta detected)")
+    module_id = game_module_id(root, common_id, exports)
     subprocess.run(
         [
             "cmake",
@@ -75,6 +79,7 @@ def build_runtime(root, args, common_id, exports, sources, defaults, generate_ca
     extra = [
         "-DMKW_RUNTIME_SOURCES=" + ";".join(str(p) for p in sources),
         "-DMKW_PYTHON=" + sys.executable,
+        "-DMKW_PYTHON_PREFIX=" + sys.prefix,
         *[f"-D{name}={os.environ[name]}" for name in ("CMAKE_PREFIX_PATH", "VULKAN_PREFIX") if name in os.environ],
     ]
     build(root, args, common_id, exports, root / "tools/macos-runtime", out, extra)

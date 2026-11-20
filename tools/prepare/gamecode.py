@@ -48,13 +48,24 @@ def write_link_response(rsp: Path, objects: list[Path], windows_quoting: bool) -
     rsp.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def module_id(target: str) -> str:
+    if target == "macos-x86_64":
+        from darwin import game_module_id
+
+        return game_module_id(ROOT, build.game_id(), build.RT_EXPORTS)
+    return build.game_id()
+
+
 def compile_game(
-    game: Path, exefs: Path, work: Path, cc: list[str], target: str, jobs: int, dest: Path | None = None
+    game: Path, exefs: Path, work: Path, cc: list[str], target: str, jobs: int, dest: Path | None = None,
+    runtime: Path | None = None,
 ) -> None:
     """The game code library and its id into dest (default the game folder; prepare.py --next: setup-next/)."""
     dest = dest or game
     gen, obj = work / "generated", work / "obj"
     windows = target == "windows"
+    darwin = target == "macos-x86_64"
+    game_id = module_id(target)
     flags = [*build.GEN_FLAGS, *([] if windows else ["-fPIC"])]
     if Path(cc[0]).stem == "zig":
         # zig cc turns -O1 into -O2 with both vectorizers, keeps frame pointers, adds debug info and UBSan, and spells
@@ -71,7 +82,7 @@ def compile_game(
     srcs = sorted(p for mod in build.gen_modules(gen) for p in (gen / mod).glob("*.c"))
     obj.mkdir(parents=True, exist_ok=True)
     (obj / "modules.c").write_text(build.module_glue(gen, exefs, True))
-    gid = f'-DRT_GAME_ID="{build.game_id()}"'
+    gid = f'-DRT_GAME_ID="{game_id}"'
     # every folder with a runtime header the package carries (runtime/cpu, runtime/core/boot for gamelib.h), as build.py
     # does: a fixed list missed gamelib.h when it moved to core/boot (issue #1, v0.1.1)
     inc = [f"-I{d}" for d in sorted({p.parent for p in (ROOT / "runtime").rglob("*.h")})] + [f"-I{gen}"]
@@ -81,6 +92,12 @@ def compile_game(
     jobs_c.sort(key=lambda j: -j[0].stat().st_size)  # the largest first: no 10 MB main_table.c alone at the end
     total, done = len(jobs_c) + 1, 0  # the link is the last unit: a progress bar full before it hid it (issue #2)
     extra = [str(package_dir(game) / "lib/libmkw.dll.a")] if windows else ["-Wl,-z,noexecstack"]
+    if darwin:
+        host = (runtime or game) / "libmkw-host.1.dylib"
+        if not host.is_file():
+            raise Failed(f"Darwin host ABI library missing: {host}")
+        extra = [str(host), "-Wl,-install_name,@rpath/mkwgame.dylib", "-Wl,-exported_symbol,_mkwgame_tables",
+                 "-Wl,-adhoc_codesign"]
     # The chunks see runtime/cpu and only the generated headers they name: a new patch set changes the generated
     # patches.h, which no chunk includes, and recompiled all 359 of them (PR 450 on 16/11/2026, 9 min on the 6-thread
     # Windows PC). modules.c sees every folder and keeps the whole list.
@@ -112,13 +129,13 @@ def compile_game(
         stamp.unlink(missing_ok=True)
         return compile_one(cc, f, src, out, stamp, key)
 
-    lib = dest / ("mkwgame.dll" if windows else "mkwgame.so")
+    lib = dest / ("mkwgame.dll" if windows else "mkwgame.dylib" if darwin else "mkwgame.so")
     part = lib.with_name(lib.name + ".part")
     rsp = obj / "link.rsp"  # ~360 objects: past the Windows command line limit
     link = crt_link(game, cc, lib, part, obj, [f"@{rsp}", *extra]) if windows else None
     with ThreadPoolExecutor(jobs) as pool:
         # first, so it runs beside the compiles; not needed with the package's prebuilt C runtime (crt_link)
-        probe = None if link else pool.submit(probe_link, cc, obj, windows)
+        probe = None if link or darwin else pool.submit(probe_link, cc, obj, windows)
         for err in pool.map(one, jobs_c):
             if err:
                 raise Failed(f"compiling the game code failed: {err}")
@@ -135,7 +152,7 @@ def compile_game(
     write_link_response(rsp, objs, windows or Path(cc[0]).stem == "zig")
     t0 = time.monotonic()
     try:
-        r = subprocess.run(link or [*cc, "-shared", "-o", str(part), f"@{rsp}", *extra], capture_output=True,
+        r = subprocess.run(link or [*cc, "-dynamiclib" if darwin else "-shared", "-o", str(part), f"@{rsp}", *extra], capture_output=True,
                            **UTF8, check=False, timeout=LINK_TIMEOUT)  # fmt: skip
     except subprocess.TimeoutExpired as e:
         raise Failed(f"linking the game code took over {LINK_TIMEOUT // 60} min: {tail_of(e.stderr)}") from None
@@ -144,7 +161,7 @@ def compile_game(
         raise Failed(f"linking the game code failed: {r.stderr.strip()[-300:]}")
     part.replace(lib)
     emit("progress", total, total)
-    (dest / "mkwgame.id").write_text(build.game_id())  # runtime/core/boot/gamelib.c rt_game_present
+    (dest / "mkwgame.id").write_text(game_id)  # runtime/core/boot/gamelib.c rt_game_present
 
 
 def compile_one(cc: list[str], flags: list[str], src: Path, out: Path, stamp: Path, key: str) -> str:

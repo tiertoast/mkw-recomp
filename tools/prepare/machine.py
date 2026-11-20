@@ -47,6 +47,13 @@ def package_dir(game: Path) -> Path:
 
 
 def default_cc(game: Path, target: str) -> list[str]:
+    if target == "macos-x86_64":
+        from darwin import xcrun
+
+        if sys.platform != "darwin" or build.HOST_ARCH != "x86_64":
+            raise Failed("macos-x86_64 needs an x86_64 Darwin toolchain")
+        return [xcrun("--find", "clang"), "-arch", "x86_64", "-isysroot", xcrun("--show-sdk-path"),
+                "-mmacosx-version-min=26.0"]
     zig = package_dir(game) / "zig" / ("zig.exe" if os.name == "nt" else "zig")
     if zig.is_file():
         # zig finds its lib/ from the path it reads as its own executable (/proc/self/exe); when that path is not the

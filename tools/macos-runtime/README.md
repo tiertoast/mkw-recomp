@@ -20,3 +20,12 @@ usage description in the executable for opt-in Switch 2 controller discovery.
 For a controlled startup without a game, use an empty directory for `MKW_GAME_DIR`, set `VK_DRIVER_FILES` to the
 NullMoth NVK manifest, and run `MKW_LAUNCHER_SHOT=3:settings /path/to/mkw --launcher`. The launcher renders the
 settings page, writes `launcher.png` in the current directory and quits.
+
+The developer build links the launcher's setup sources and Python environment into its output directory.
+Build using the repository's Python environment with its setup dependencies installed. Keep that environment and
+checkout available. Setup uses xcrun's Apple Clang and SDK. The selected installation receives mkwgame.dylib and
+mkwgame.id, while the versioned host library stays beside mkw. To validate module loading alone, run
+`MKW_GAME_DIR=/path/to/installation /path/to/mkw --probe-game-module`.
+
+For the subsequent shader stage, supply a validated SM86 instructions.json in build/sm86 in the checkout or
+sm86 in the installation, plus native glslc. The spec generator's pinned NVIDIA tools target Linux and Windows.
