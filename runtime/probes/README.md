@@ -19,6 +19,8 @@ VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse
 VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --resource-size-control
 # 32-bit layer-offset discriminator (G5-L), with NVK's VA log:
 NVK_DEBUG=vm VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --wrap-discriminator
+# Copies that touch unbound tiles of a small image (G5-L, H2); may end in a device loss by design:
+NVK_DEBUG=vm VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --unbound-access
 ```
 
 Or compile directly with Apple Clang:
@@ -85,6 +87,17 @@ reports where the wrap marker went; a device loss means it reached memory outsid
 only mode that intentionally exceeds `maxResourceSize` (`INTENTIONAL_OVER_LIMIT`); the sparse address-space limit
 still applies. With `NVK_DEBUG=vm`, NVK logs the image's base VA, and the `PREDICT` lines give the wrapped and
 unwrapped addresses relative to it. Backing is about 4 MiB for this shape (one level), and its readback the same.
+
+`--unbound-access` tests whether a copy that touches an unbound tile faults. Vulkan allows it on a sparse-residency
+image: with `residencyNonResidentStrict` reads are zero and writes are discarded, and without it the access is still
+safe, so a device loss is out of spec either way. The image is 512x512 BC7 with one mip and four tiles, far from 4 GiB
+offsets, mip tails and `maxResourceSize`. Only tile (0,0) is bound. A marker written there and read back through both
+the image and the backing is the control. Then come a read, a write and a second read of never-bound tile (1,1).
+Tile (0,0) is then unbound, as the renderer does when an NVN pool page is unmapped, and read and written. Each access
+is its own submission, so the checkpoint of a device loss names it. After each write, the backing is read through a
+buffer to see whether the write reached memory. `VERDICT UNBOUND_ACCESS_STRICT`, `UNBOUND_ACCESS_VIOLATES_STRICT` or
+`UNBOUND_ACCESS_NO_FAULT` sums up the values, and a `NOTE` says if the unbound tile still reached its former memory.
+Only the copy engine is exercised: sampling an unbound tile in a shader is outside this shader-free probe.
 
 Allocations are capped at 128 MiB total, 10% of each heap, and a quarter of the currently reported free budget
 when `VK_EXT_memory_budget` is available. The large plan is skipped if its estimated backing/staging exceeds the

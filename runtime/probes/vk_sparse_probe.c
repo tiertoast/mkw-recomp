@@ -209,8 +209,8 @@ static void submit(void) {
     wait_checkpoint();
 }
 
-static void bind_image(Image *i, int tails) {
-    start(tails ? "bind-mip-tails-metadata" : "bind-tiles");
+static void bind_named(Image *i, int tails, const char *name) {
+    start(name);
     if (!(tails ? i->ntails : i->ntiles)) { puts("SKIP no bindings of this kind"); return; }
     uint64_t previous = serial, next = ++serial;
     VkTimelineSemaphoreSubmitInfo tl = {.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
@@ -226,6 +226,7 @@ static void bind_image(Image *i, int tails) {
     VK(vkQueueBindSparse(queue, 1, &bi, fence));
     wait_checkpoint();
 }
+static void bind_image(Image *i, int tails) { bind_named(i, tails, tails ? "bind-mip-tails-metadata" : "bind-tiles"); }
 
 static uint32_t dim(uint32_t w, uint32_t mip) { return w >> mip ? w >> mip : 1; }
 static uint32_t min32(uint32_t a, uint32_t b) { return a < b ? a : b; }
@@ -575,7 +576,7 @@ static int run_image(uint32_t width, uint32_t layers, int large, int tiled_contr
 // tile of the level holding the predicted wrapped address, copies a distinct 32x32 marker into each of the two
 // layers, and finds the markers by copying the backing memory through a buffer: no image addressing is involved in
 // the oracle. If the prediction holds, nothing is written to an unbound tile, so the run separates the wrap from a
-// fault on unbound pages (tested elsewhere). The image intentionally exceeds maxResourceSize, which NVK reports as
+// fault on unbound pages (--unbound-access). The image intentionally exceeds maxResourceSize, which NVK reports as
 // UINT32_MAX with a TODO (nvk_image.c); G5-J created the same shape.
 #define WRAP_PATCH 32              // texels a side: 8x8 BC7 blocks, inside one tile
 #define WRAP_BLOCKS 64
@@ -665,6 +666,40 @@ static int wrap_skip(Image *i, const char *why) {
     printf("SKIP [%s/%s] %s; no allocation or queue work\n", scenario, checkpoint, why);
     if (i->handle) vkDestroyImage(device, i->handle, NULL);
     free(i); return 77;
+}
+
+// Backing memory for the tile binds, also bound to a buffer so the host reads it with no image addressing, plus the
+// upload (i->bytes) and readback (i->backing) buffers. Returns 0, having created nothing, when no memory type serves
+// both the image and a buffer.
+static int oracle_backing(Image *i) {
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = i->backing,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    VK(vkCreateBuffer(device, &bi, NULL, &i->backing_buffer));
+    VkMemoryRequirements br;
+    vkGetBufferMemoryRequirements(device, i->backing_buffer, &br);
+    uint32_t common = br.memoryTypeBits & i->req.memoryTypeBits;
+    printf("BACKING bufferTypes=%#x imageTypes=%#x common=%#x bufferRequirement=%llu\n", br.memoryTypeBits,
+        i->req.memoryTypeBits, common, (unsigned long long)br.size);
+    if (!common) {
+        vkDestroyBuffer(device, i->backing_buffer, NULL);
+        i->backing_buffer = VK_NULL_HANDLE;
+        return 0;
+    }
+    i->allocation = allocate(br.size, memory_type(common, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+    VK(vkBindBufferMemory(device, i->backing_buffer, i->allocation.handle, 0));
+    for (uint32_t n = 0; n < i->ntiles; n++) i->tiles[n].memory = i->allocation.handle;
+    i->upload = buffer(i->bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    i->readback = buffer(i->backing, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    return 1;
+}
+
+static void oracle_fill(Image *i) {   // zeroes the backing before any bind, so every later nonzero byte was written
+    start("initialize-backing-buffer");
+    begin(); vkCmdFillBuffer(cmd, i->backing_buffer, 0, VK_WHOLE_SIZE, 0);
+    VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    submit();
 }
 
 static int run_wrap_discriminator(void) {
@@ -780,23 +815,8 @@ static int run_wrap_discriminator(void) {
     pass();
 
     start("allocate-backing");
-    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = i->backing,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
-    VK(vkCreateBuffer(device, &bi, NULL, &i->backing_buffer));
-    VkMemoryRequirements br;
-    vkGetBufferMemoryRequirements(device, i->backing_buffer, &br);
-    uint32_t common = br.memoryTypeBits & i->req.memoryTypeBits;
-    printf("BACKING bufferTypes=%#x imageTypes=%#x common=%#x bufferRequirement=%llu\n", br.memoryTypeBits,
-        i->req.memoryTypeBits, common, (unsigned long long)br.size);
-    if (!common) {
-        vkDestroyBuffer(device, i->backing_buffer, NULL);
+    if (!oracle_backing(i))
         return wrap_skip(i, "no memory type serves both the image and a buffer: the oracle reads the backing through one");
-    }
-    i->allocation = allocate(br.size, memory_type(common, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
-    VK(vkBindBufferMemory(device, i->backing_buffer, i->allocation.handle, 0));
-    for (uint32_t n = 0; n < i->ntiles; n++) i->tiles[n].memory = i->allocation.handle;
-    i->upload = buffer(i->bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-    i->readback = buffer(i->backing, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     for (uint32_t n = 0; n < 2; n++)
         for (uint32_t b = 0; b < WRAP_BLOCKS; b++)
             wrap_marker(i->upload.map + (n * WRAP_BLOCKS + b) * 16, n, n ? wrap : control, b);
@@ -805,12 +825,7 @@ static int run_wrap_discriminator(void) {
     VK(vkFlushMappedMemoryRanges(device, 1, &up));
     memory_log(); pass();
 
-    start("initialize-backing-buffer");
-    begin(); vkCmdFillBuffer(cmd, i->backing_buffer, 0, VK_WHOLE_SIZE, 0);
-    VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    submit();
+    oracle_fill(i);
     bind_image(i, 0);
     puts("TILED_ONLY imageOpaqueBindCount=0 throughout this run");
     transition(i, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, "layout-undefined-to-dst");
@@ -865,13 +880,184 @@ static int run_wrap_discriminator(void) {
     free(i); memory_log(); pass(); return 0;
 }
 
+// --unbound-access (G5-L, hypothesis H2): does a copy that touches an unbound tile of a partially resident image fault?
+// Vulkan allows such accesses on SPARSE_RESIDENCY images: with residencyNonResidentStrict they read as zero and writes
+// are discarded, without it they are "considered safe" and reads return poison (sparsemem.html, "Sparse Resource
+// Features"), so a device loss is out of spec either way. In G5-J the 32-bit wrapped write reached an
+// unbound tile and the GPU raised FAULT_PTE although NVK reports the property, which points at the page tables of
+// NullMoth's private nvkmd backend (upstream nouveau maps them with DRM_NOUVEAU_VM_BIND_SPARSE). Here the image is
+// 512x512, one mip, four tiles: no 4 GiB offset, no mip tail, nothing near maxResourceSize. Tile (0,0) is bound and
+// written as a control; then, each in its own submission so a device loss's checkpoint names it: a read and a write
+// of never-bound tile (1,1), the same tile read again, tile (0,0) unbound, then read and written. The backing is read
+// through a buffer as in --wrap-discriminator. Copy engine only: this probe has no shaders, so sampling an unbound
+// tile (what the game's terrain does) goes through the same page tables but is not exercised.
+#define UNBOUND_PATCH_BYTES (WRAP_BLOCKS * 16)
+
+static void unbound_write(Image *i, VkExtent3D g, uint32_t tx, uint32_t ty, uint32_t marker, const char *name) {
+    start(name); begin();
+    VkBufferImageCopy c = {.bufferOffset = (VkDeviceSize)marker * UNBOUND_PATCH_BYTES,
+        .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        .imageOffset = {(int32_t)(tx * g.width), (int32_t)(ty * g.height), 0}, .imageExtent = {WRAP_PATCH, WRAP_PATCH, 1}};
+    vkCmdCopyBufferToImage(cmd, i->upload.handle, i->handle, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    submit();
+}
+
+// ZERO (what strict residency requires of an unbound tile), MARKER (data some tile's memory holds), UNWRITTEN (the copy
+// left the host's 0xcc fill) or OTHER.
+static const char *unbound_read(Image *i, Buffer *out, VkExtent3D g, uint32_t tx, uint32_t ty, const char *name) {
+    memset(out->map, 0xcc, UNBOUND_PATCH_BYTES);
+    VkMappedMemoryRange r = {.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, .memory = out->allocation.handle,
+        .size = VK_WHOLE_SIZE};
+    VK(vkFlushMappedMemoryRanges(device, 1, &r));
+    start(name); begin();
+    VkBufferImageCopy c = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        .imageOffset = {(int32_t)(tx * g.width), (int32_t)(ty * g.height), 0}, .imageExtent = {WRAP_PATCH, WRAP_PATCH, 1}};
+    vkCmdCopyImageToBuffer(cmd, i->handle, VK_IMAGE_LAYOUT_GENERAL, out->handle, 1, &c);
+    VkMemoryBarrier b = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &b, 0, NULL, 0, NULL);
+    submit();
+    VK(vkInvalidateMappedMemoryRanges(device, 1, &r));
+    uint32_t zero = 0, fill = 0, markers = 0;
+    for (uint32_t n = 0; n < UNBOUND_PATCH_BYTES; n++) zero += !out->map[n], fill += out->map[n] == 0xcc;
+    for (uint32_t n = 0; n < UNBOUND_PATCH_BYTES; n += 16) markers += wrap_is_marker(out->map + n) ? 1u : 0u;
+    const char *what = zero == UNBOUND_PATCH_BYTES ? "ZERO" : markers ? "MARKER" :
+                       fill == UNBOUND_PATCH_BYTES ? "UNWRITTEN" : "OTHER";
+    printf("READ [%s] tile %u,%u: zeroBytes=%u untouchedBytes=%u markerBlocks=%u of %u -> %s\n", name, tx, ty, zero,
+        fill, markers, WRAP_BLOCKS, what);
+    return what;
+}
+
+static int run_unbound_access(void) {
+    scenario = "512x512-unbound-access";
+    Image *i = calloc(1, sizeof *i);
+    require(i != NULL, "host allocation");
+    i->width = 512; i->layers = 1; i->mips = 1;
+    VkPhysicalDeviceSparseProperties sp = props.sparseProperties;
+    printf("SPARSE_PROPERTIES residencyNonResidentStrict=%u residencyStandard2DBlockShape=%u residencyAlignedMipSize=%u\n",
+        sp.residencyNonResidentStrict, sp.residencyStandard2DBlockShape, sp.residencyAlignedMipSize);
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .flags = VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT | VK_IMAGE_CREATE_SPARSE_ALIASED_BIT,
+        .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_BC7_UNORM_BLOCK, .extent = {i->width, i->width, 1},
+        .mipLevels = i->mips, .arrayLayers = i->layers, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    start("create-image");
+    VK(vkCreateImage(device, &ci, NULL, &i->handle)); pass();
+    start("memory-requirements");
+    vkGetImageMemoryRequirements(device, i->handle, &i->req);
+    vkGetImageSparseMemoryRequirements(device, i->handle, &i->nsparse, NULL);
+    conformance_require(i->nsparse && i->nsparse <= 8 && i->req.alignment && i->req.memoryTypeBits, "invalid memory requirements");
+    vkGetImageSparseMemoryRequirements(device, i->handle, &i->nsparse, i->sparse);
+    printf("REQUIREMENTS virtual=%llu alignment=%llu types=%#x sparseCount=%u\n", (unsigned long long)i->req.size,
+        (unsigned long long)i->req.alignment, i->req.memoryTypeBits, i->nsparse);
+    pass();
+    if (!tiled_eligible(i)) { vkDestroyImage(device, i->handle, NULL); free(i); return 77; }
+    validate_requirements(i);
+
+    start("plan-residency");
+    const VkSparseImageMemoryRequirements *color = NULL;
+    for (uint32_t n = 0; n < i->nsparse; n++)
+        if (i->sparse[n].formatProperties.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT) color = &i->sparse[n];
+    require(color != NULL, "no color sparse requirements");
+    VkExtent3D g = color->formatProperties.imageGranularity;
+    require(g.width && g.height && g.depth == 1, "unsupported granularity");
+    if (2 * g.width > i->width || 2 * g.height > i->width || g.width < WRAP_PATCH || g.height < WRAP_PATCH)
+        return wrap_skip(i, "the image is not at least 2x2 tiles of 32x32 texels or more");
+    wrap_tile(i, 0, 0, 0, 0, g);   // slot 0: tile (0,0); (1,0), (0,1) and (1,1) are never bound
+    i->bytes = 3 * UNBOUND_PATCH_BYTES;   // markers: 0 control at (0,0), 1 to never-bound (1,1), 2 to (0,0) once unbound
+    printf("PLAN tileBinds=1 (tile 0,0) neverBound=3 opaqueBinds=0 backing=%llu transfer=%llu bytes\n",
+        (unsigned long long)i->backing, (unsigned long long)i->bytes);
+    pass();
+
+    start("allocate-backing");
+    if (!oracle_backing(i))
+        return wrap_skip(i, "no memory type serves both the image and a buffer: the oracle reads the backing through one");
+    for (uint32_t n = 0; n < 3; n++)
+        for (uint32_t b = 0; b < WRAP_BLOCKS; b++) wrap_marker(i->upload.map + (n * WRAP_BLOCKS + b) * 16, n, 0, b);
+    VkMappedMemoryRange up = {.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+        .memory = i->upload.allocation.handle, .size = VK_WHOLE_SIZE};
+    VK(vkFlushMappedMemoryRanges(device, 1, &up));
+    Buffer out = buffer(UNBOUND_PATCH_BYTES, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    memory_log(); pass();
+
+    oracle_fill(i);
+    bind_image(i, 0);
+    transition(i, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, "layout-undefined-to-general");
+
+    // Controls: a bound tile is written and read back correctly, through both the backing and the image.
+    unbound_write(i, g, 0, 0, 0, "write-bound-control");
+    wrap_readback(i, "readback-after-control");
+    start("locate-control");
+    WrapFound c = wrap_locate(i, 0);
+    wrap_report(i, "control", c);
+    if (c.found != WRAP_BLOCKS || c.slots != 1 || c.slot_first != 0) {
+        failure_kind = "ORACLE";
+        fail("control marker not exactly in the bound tile");
+    }
+    pass();
+    if (strcmp(unbound_read(i, &out, g, 0, 0, "read-bound-control"), "MARKER")) {
+        failure_kind = "ORACLE";
+        fail("the bound tile did not read back its marker");
+    }
+
+    puts("PREDICT next: strict residency -> ZERO, no fault; a device loss at read-never-bound or write-never-bound -> H2 "
+         "(no sparse page-table entries for unbound pages)");
+    const char *never_read = unbound_read(i, &out, g, 1, 1, "read-never-bound");
+    unbound_write(i, g, 1, 1, 1, "write-never-bound");
+    wrap_readback(i, "readback-after-never-bound-write");
+    start("locate-never-bound-write");
+    WrapFound leak = wrap_locate(i, 1);
+    wrap_report(i, "never-bound write", leak);
+    c = wrap_locate(i, 0);
+    pass();
+    const char *never_reread = unbound_read(i, &out, g, 1, 1, "reread-never-bound");
+
+    // Unbinding is what the renderer does when NVN unmaps a pool page: the old memory must stop being reachable.
+    i->tiles[0].memory = VK_NULL_HANDLE;
+    i->tiles[0].memoryOffset = 0;
+    bind_named(i, 0, "unbind-control-tile");
+    puts("PREDICT next: strict residency -> ZERO (not the control marker) and the write discarded; a device loss at "
+         "read-unbound or write-unbound -> H2 for unbound-after-bound pages");
+    const char *unbound_reread = unbound_read(i, &out, g, 0, 0, "read-unbound");
+    unbound_write(i, g, 0, 0, 2, "write-unbound");
+    wrap_readback(i, "readback-after-unbound-write");
+    start("verdict");
+    WrapFound stale = wrap_locate(i, 2), after = wrap_locate(i, 0);
+    wrap_report(i, "unbound write", stale);
+    wrap_report(i, "control after unbind", after);
+    printf("STRAY nonzero 16-byte blocks outside markers=%llu\n", (unsigned long long)wrap_stray(i));
+    int reads_zero = !strcmp(never_read, "ZERO") && !strcmp(never_reread, "ZERO") && !strcmp(unbound_reread, "ZERO");
+    int writes_discarded = !leak.found && !stale.found && c.found == WRAP_BLOCKS && after.found == WRAP_BLOCKS;
+    printf("RESULT_DETAIL readNeverBound=%s rereadNeverBound=%s readUnbound=%s neverBoundWriteInBacking=%u "
+           "unboundWriteInBacking=%u controlIntact=%d\n", never_read, never_reread, unbound_reread, leak.found,
+           stale.found, after.found == WRAP_BLOCKS);
+    if (reads_zero && writes_discarded)
+        puts("VERDICT UNBOUND_ACCESS_STRICT no fault; unbound reads are zero and unbound writes are discarded: H2 refuted "
+             "for copy-engine access to a small image");
+    else if (sp.residencyNonResidentStrict)
+        printf("VERDICT UNBOUND_ACCESS_VIOLATES_STRICT no fault, but residencyNonResidentStrict=1 and %s%s\n",
+            reads_zero ? "" : "an unbound read was not zero ", writes_discarded ? "" : "an unbound write reached memory");
+    else
+        puts("VERDICT UNBOUND_ACCESS_NO_FAULT no fault; values differ from strict residency, which this device does not claim");
+    if (!strcmp(unbound_reread, "MARKER") || stale.found)
+        puts("NOTE the unbound tile still reached its former memory: the unbind did not reach the page tables");
+    pass();
+
+    start("release-completed-resources");
+    vkDestroyImage(device, i->handle, NULL);
+    vkDestroyBuffer(device, i->backing_buffer, NULL);
+    release_allocation(i->allocation); release_buffer(i->upload); release_buffer(i->readback); release_buffer(out);
+    free(i); memory_log(); pass(); return 0;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0); setvbuf(stderr, NULL, _IONBF, 0);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--application-shape") && strcmp(argv[1], "--tiled-control") &&
         strcmp(argv[1], "--large-tiled-control") && strcmp(argv[1], "--resource-size-control") &&
-        strcmp(argv[1], "--wrap-discriminator"))) {
+        strcmp(argv[1], "--wrap-discriminator") && strcmp(argv[1], "--unbound-access"))) {
         fprintf(stderr, "usage: %s [--application-shape | --tiled-control | --large-tiled-control | --resource-size-control |"
-            " --wrap-discriminator]\n"
+            " --wrap-discriminator | --unbound-access]\n"
             "Set VK_DRIVER_FILES externally to the installed NVK manifest.\n", argv[0]);
         return 2;
     }
@@ -979,9 +1165,12 @@ int main(int argc, char **argv) {
     int large_tiled_control = argc == 2 && !strcmp(argv[1], "--large-tiled-control");
     int resource_size_control = argc == 2 && !strcmp(argv[1], "--resource-size-control");
     int wrap_discriminator = argc == 2 && !strcmp(argv[1], "--wrap-discriminator");
-    int status = wrap_discriminator ? run_wrap_discriminator() : resource_size_control ? run_image(8192, 32, 1, 1) :
+    int unbound_access = argc == 2 && !strcmp(argv[1], "--unbound-access");
+    int status = unbound_access ? run_unbound_access() : wrap_discriminator ? run_wrap_discriminator() :
+        resource_size_control ? run_image(8192, 32, 1, 1) :
         large_tiled_control ? run_image(8192, 68, 1, 1) : run_image(512, 4, 0, tiled_control);
-    if (!status && argc == 2 && !tiled_control && !large_tiled_control && !resource_size_control && !wrap_discriminator)
+    if (!status && argc == 2 && !tiled_control && !large_tiled_control && !resource_size_control && !wrap_discriminator &&
+        !unbound_access)
         status = run_image(8192, 68, 1, 0);
     scenario = "device"; start("teardown");
     vkDestroySemaphore(device, timeline, NULL); vkDestroyFence(device, fence, NULL);
