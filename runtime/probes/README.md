@@ -1,7 +1,8 @@
 # runtime/probes
 
 Self-tests of each subsystem, one command-line option each (`build/mkw --probe-…`). They come from totk-pc-recomp
-except `texpre_probe.c`, `fg_probe.c`, `fps_probe.c`, `discord_probe.c`, `clk_probe.c` and `dsu_probe.c`.
+except `texpre_probe.c`, `fg_probe.c`, `fps_probe.c`, `discord_probe.c`, `clk_probe.c`, `dsu_probe.c`
+and `lock_probe.c`.
 
 | File | Option | What it checks |
 |---|---|---|
@@ -16,6 +17,7 @@ except `texpre_probe.c`, `fg_probe.c`, `fps_probe.c`, `discord_probe.c`, `clk_pr
 | `gfx_abi_probe.c` | `--probe-gfx-abi` | Our objects fit in NVN's and the fields the game reads are where it expects them |
 | `gfx_window_probe.c` | `--probe-window` | Window present, vsync, focus, cursor and resize |
 | `kernel_probe.c` | `--probe-kernel` | Waits, wakeups, virtual cores and their arguments (cores 0-5), fibers (also one moved between threads) and translated code on four threads |
+| `lock_probe.c` | `--probe-locks` | MKW's own: `platform.h`'s locks and condition variables under contention (eight threads on one lock, two writers and six readers on a shared one, producers and consumers with timed waits through a queue), each part by a 60 s deadline that catches a lost wakeup; then an uncontended lock's and signal's cost. Needs no game files |
 | `nvn_probe.c` | `--probe-nvn` | The NVN front end over the null back end, called as the game calls it |
 | `nvn_tex_probe.c` | `--probe-nvn-tex` | Size, alignment and mip offsets of textures (`nvn_tex.c`) |
 | `ov_probe.c`, `ov_probe.h` | `--probe-services` | Each replacement of `runtime/sdk/` and NVN2's native images called through its synthetic address; a linked one the loaded game imports and no probe calls fails it |

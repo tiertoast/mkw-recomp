@@ -135,7 +135,7 @@ void plat_sleep_ms(uint32_t ms);          // coarse sleep: the scheduler's granu
 #ifdef __APPLE__
 // Inline words for Darwin address waits. Zero-filled objects require no resource destruction.
 typedef struct { uint64_t state; } PlatMutex;
-typedef struct { uint64_t sequence; } PlatCond;
+typedef struct { uint32_t sequence, waiters; } PlatCond;   // darwin_sync.c: a wake only for a counted waiter
 #else
 typedef struct { void *p; } PlatMutex;
 typedef struct { void *p; } PlatCond;
