@@ -1051,13 +1051,147 @@ static int run_unbound_access(void) {
     free(i); memory_log(); pass(); return 0;
 }
 
+// --rebind-patterns (G5-L): the bind sequences the renderer issues that the modes above do not. In the first game run
+// on a driver with both G5-L fixes, a 4-bind vkQueueBindSparse failed with VK_ERROR_DEVICE_LOST after 137 s, with no
+// GPU fault: the bind itself failed. vk_sparse.c merges runs of up to 32 blocks into one bind, later unbinds or
+// rebinds single blocks of a run, and moves a block from one 16 MiB memory block to another without an unbind in
+// between (Vulkan allows binding over a bound region). NullMoth's nvkmd_nvrm_va maps each bind as one RM mapping, keeps
+// one hMemoryPhys per image, and unmaps with NVOS47 size 0, which RM documents as "unmap entire mapping"
+// (src/common/sdk/nvidia/inc/nvos.h, 620.70.06); RM also tracks mappings to catch overlaps (mapping_list.c).
+// The image is 512x512 BC7, one mip, 2x2 tiles; memory A backs the four tiles, memory B one more. Each step is its own
+// queue operation, so a failing bind names its checkpoint; values are checked through the image and a wrong value is
+// reported, not fatal, so later steps still run.
+static int rebind_read(Image *i, Buffer *out, VkExtent3D g, uint32_t tx, uint32_t ty, const char *name) {
+    const char *what = unbound_read(i, out, g, tx, ty, name);
+    if (!strcmp(what, "ZERO")) return -1;
+    if (!strcmp(what, "MARKER")) return out->map[4];   // the marker's region: which write it was
+    return -2;
+}
+
+static void rebind_submit(Image *i, const VkSparseImageMemoryBind *b, uint32_t n, const char *name) {
+    memcpy(i->tiles, b, n * sizeof *b);
+    i->ntiles = n;
+    bind_named(i, 0, name);
+}
+
+static int run_rebind_patterns(void) {
+    scenario = "512x512-rebind-patterns";
+    Image *i = calloc(1, sizeof *i);
+    require(i != NULL, "host allocation");
+    i->width = 512; i->layers = 1; i->mips = 1;
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .flags = VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT | VK_IMAGE_CREATE_SPARSE_ALIASED_BIT,
+        .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_BC7_UNORM_BLOCK, .extent = {i->width, i->width, 1},
+        .mipLevels = i->mips, .arrayLayers = i->layers, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    start("create-image");
+    VK(vkCreateImage(device, &ci, NULL, &i->handle)); pass();
+    start("memory-requirements");
+    vkGetImageMemoryRequirements(device, i->handle, &i->req);
+    vkGetImageSparseMemoryRequirements(device, i->handle, &i->nsparse, NULL);
+    conformance_require(i->nsparse && i->nsparse <= 8 && i->req.alignment && i->req.memoryTypeBits, "invalid memory requirements");
+    vkGetImageSparseMemoryRequirements(device, i->handle, &i->nsparse, i->sparse);
+    pass();
+    if (!tiled_eligible(i)) { vkDestroyImage(device, i->handle, NULL); free(i); return 77; }
+    validate_requirements(i);
+    start("plan");
+    const VkSparseImageMemoryRequirements *color = NULL;
+    for (uint32_t n = 0; n < i->nsparse; n++)
+        if (i->sparse[n].formatProperties.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT) color = &i->sparse[n];
+    require(color != NULL, "no color sparse requirements");
+    VkExtent3D g = color->formatProperties.imageGranularity;
+    if (2 * g.width != i->width || 2 * g.height != i->width || g.width < WRAP_PATCH || g.height < WRAP_PATCH)
+        return wrap_skip(i, "the image is not exactly 2x2 tiles of 32x32 texels or more");
+    VkDeviceSize tile = i->req.alignment;
+    uint32_t type = memory_type(i->req.memoryTypeBits, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    pass();
+
+    start("allocate");
+    Allocation a = allocate(4 * tile, type), b = allocate(tile, type);
+    i->bytes = 5 * UNBOUND_PATCH_BYTES;   // markers 0-3 for tiles 0-3 from A, 4 for tile 3 once moved to B
+    i->upload = buffer(i->bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    for (uint32_t n = 0; n < 5; n++)
+        for (uint32_t k = 0; k < WRAP_BLOCKS; k++) wrap_marker(i->upload.map + (n * WRAP_BLOCKS + k) * 16, n, 0, k);
+    VkMappedMemoryRange up = {.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, .memory = i->upload.allocation.handle,
+        .size = VK_WHOLE_SIZE};
+    VK(vkFlushMappedMemoryRanges(device, 1, &up));
+    Buffer out = buffer(UNBOUND_PATCH_BYTES, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    memory_log(); pass();
+
+    const uint32_t tx[4] = {0, 1, 0, 1}, ty[4] = {0, 0, 1, 1};
+#define RB_TILE(t, mem, off) (VkSparseImageMemoryBind){.subresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0}, \
+        .offset = {(int32_t)(tx[t] * g.width), (int32_t)(ty[t] * g.height), 0}, .extent = {g.width, g.height, 1}, \
+        .memory = (mem), .memoryOffset = (off)}
+    // 1: one bind for the whole level from A, as the renderer's merged runs: one RM mapping of four tiles.
+    VkSparseImageMemoryBind whole = {.subresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0}, .extent = {i->width, i->width, 1},
+        .memory = a.handle, .memoryOffset = 0};
+    puts("PREDICT spec: every step succeeds; unbound tiles read ZERO, bound tiles read the marker last written there");
+    rebind_submit(i, &whole, 1, "bind-whole-level-one-bind");
+    transition(i, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, "layout-undefined-to-general");
+    for (uint32_t t = 0; t < 4; t++) unbound_write(i, g, tx[t], ty[t], t, "write-markers-0-3");
+    int r0[4];
+    for (uint32_t t = 0; t < 4; t++) r0[t] = rebind_read(i, &out, g, tx[t], ty[t], "read-after-bind");
+    if (r0[0] != 0 || r0[1] != 1 || r0[2] != 2 || r0[3] != 3) {
+        failure_kind = "ORACLE";
+        fail("tiles of the whole-level bind did not read back their own markers");
+    }
+
+    // 2: unbind tile 1 alone, inside the four-tile mapping. Its neighbours must keep their memory.
+    VkSparseImageMemoryBind ub1 = RB_TILE(1, VK_NULL_HANDLE, 0);
+    puts("PREDICT next: a failure at unbind-one-tile-of-run, or tiles 0/2/3 reading ZERO, means an unbind removes more "
+         "than the range asked (NVOS47 size 0: the entire RM mapping)");
+    rebind_submit(i, &ub1, 1, "unbind-one-tile-of-run");
+    int r1[4];
+    for (uint32_t t = 0; t < 4; t++) r1[t] = rebind_read(i, &out, g, tx[t], ty[t], "read-after-unbind-1");
+
+    // 3: unbind tile 2, also inside the original run.
+    VkSparseImageMemoryBind ub2 = RB_TILE(2, VK_NULL_HANDLE, 0);
+    rebind_submit(i, &ub2, 1, "unbind-second-tile-of-run");
+    int r2[4];
+    for (uint32_t t = 0; t < 4; t++) r2[t] = rebind_read(i, &out, g, tx[t], ty[t], "read-after-unbind-2");
+
+    // 4: move tile 3 from A to B with no unbind in between, then write it.
+    VkSparseImageMemoryBind mv3 = RB_TILE(3, b.handle, 0);
+    puts("PREDICT next: a failure at rebind-over-bound-tile means binding over a mapped range is refused (RM overlap)");
+    rebind_submit(i, &mv3, 1, "rebind-over-bound-tile");
+    unbound_write(i, g, tx[3], ty[3], 4, "write-moved-tile");
+    int r3 = rebind_read(i, &out, g, tx[3], ty[3], "read-moved-tile");
+
+    // 5: unbind tile 0 (memory A) after the last bind used memory B.
+    VkSparseImageMemoryBind ub0 = RB_TILE(0, VK_NULL_HANDLE, 0);
+    puts("PREDICT next: a failure at unbind-after-other-memory means the unmap names the wrong memory handle");
+    rebind_submit(i, &ub0, 1, "unbind-after-other-memory");
+    int r4[4];
+    for (uint32_t t = 0; t < 4; t++) r4[t] = rebind_read(i, &out, g, tx[t], ty[t], "read-after-unbind-0");
+#undef RB_TILE
+
+    start("verdict");
+    printf("RESULT_DETAIL afterUnbind1=%d,%d,%d,%d afterUnbind2=%d,%d,%d,%d moved3=%d afterUnbind0=%d,%d,%d,%d "
+           "(-1 zero, -2 other, n marker n)\n", r1[0], r1[1], r1[2], r1[3], r2[0], r2[1], r2[2], r2[3], r3,
+           r4[0], r4[1], r4[2], r4[3]);
+    int ok1 = r1[0] == 0 && r1[1] == -1 && r1[2] == 2 && r1[3] == 3, ok2 = r2[0] == 0 && r2[1] == -1 && r2[2] == -1 && r2[3] == 3;
+    int ok3 = r3 == 4, ok4 = r4[0] == -1 && r4[1] == -1 && r4[2] == -1 && r4[3] == 4;
+    if (ok1 && ok2 && ok3 && ok4) puts("VERDICT REBIND_PATTERNS_OK every bind succeeded and every tile read what the spec requires");
+    else printf("VERDICT REBIND_PATTERNS_WRONG_DATA binds succeeded but %s%s%s%s\n",
+        ok1 ? "" : "[unbinding tile 1 changed other tiles] ", ok2 ? "" : "[unbinding tile 2 changed other tiles] ",
+        ok3 ? "" : "[the moved tile did not read memory B] ", ok4 ? "" : "[unbinding tile 0 changed other tiles]");
+    pass();
+
+    start("release-completed-resources");
+    vkDestroyImage(device, i->handle, NULL);
+    release_allocation(a); release_allocation(b); release_buffer(i->upload); release_buffer(out);
+    free(i); memory_log(); pass(); return 0;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0); setvbuf(stderr, NULL, _IONBF, 0);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--application-shape") && strcmp(argv[1], "--tiled-control") &&
         strcmp(argv[1], "--large-tiled-control") && strcmp(argv[1], "--resource-size-control") &&
-        strcmp(argv[1], "--wrap-discriminator") && strcmp(argv[1], "--unbound-access"))) {
+        strcmp(argv[1], "--wrap-discriminator") && strcmp(argv[1], "--unbound-access") &&
+        strcmp(argv[1], "--rebind-patterns"))) {
         fprintf(stderr, "usage: %s [--application-shape | --tiled-control | --large-tiled-control | --resource-size-control |"
-            " --wrap-discriminator | --unbound-access]\n"
+            " --wrap-discriminator | --unbound-access | --rebind-patterns]\n"
             "Set VK_DRIVER_FILES externally to the installed NVK manifest.\n", argv[0]);
         return 2;
     }
@@ -1166,11 +1300,13 @@ int main(int argc, char **argv) {
     int resource_size_control = argc == 2 && !strcmp(argv[1], "--resource-size-control");
     int wrap_discriminator = argc == 2 && !strcmp(argv[1], "--wrap-discriminator");
     int unbound_access = argc == 2 && !strcmp(argv[1], "--unbound-access");
-    int status = unbound_access ? run_unbound_access() : wrap_discriminator ? run_wrap_discriminator() :
+    int rebind_patterns = argc == 2 && !strcmp(argv[1], "--rebind-patterns");
+    int status = rebind_patterns ? run_rebind_patterns() : unbound_access ? run_unbound_access() :
+        wrap_discriminator ? run_wrap_discriminator() :
         resource_size_control ? run_image(8192, 32, 1, 1) :
         large_tiled_control ? run_image(8192, 68, 1, 1) : run_image(512, 4, 0, tiled_control);
     if (!status && argc == 2 && !tiled_control && !large_tiled_control && !resource_size_control && !wrap_discriminator &&
-        !unbound_access)
+        !unbound_access && !rebind_patterns)
         status = run_image(8192, 68, 1, 0);
     scenario = "device"; start("teardown");
     vkDestroySemaphore(device, timeline, NULL); vkDestroyFence(device, fence, NULL);

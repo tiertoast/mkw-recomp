@@ -21,6 +21,8 @@ VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse
 NVK_DEBUG=vm VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --wrap-discriminator
 # Copies that touch unbound tiles of a small image (G5-L, H2); may end in a device loss by design:
 NVK_DEBUG=vm VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --unbound-access
+# Partial unbinds and binds over bound tiles, as the renderer issues them (G5-L):
+NVK_DEBUG=vm VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --rebind-patterns
 ```
 
 Or compile directly with Apple Clang:
@@ -98,6 +100,15 @@ is its own submission, so the checkpoint of a device loss names it. After each w
 buffer to see whether the write reached memory. `VERDICT UNBOUND_ACCESS_STRICT`, `UNBOUND_ACCESS_VIOLATES_STRICT` or
 `UNBOUND_ACCESS_NO_FAULT` sums up the values, and a `NOTE` says if the unbound tile still reached its former memory.
 Only the copy engine is exercised: sampling an unbound tile in a shader is outside this shader-free probe.
+
+`--rebind-patterns` covers the bind sequences `vk_sparse.c` issues that the other modes do not. The renderer binds
+merged runs of blocks, later unbinds single blocks out of a run, and moves a block to other memory with no unbind in
+between, which Vulkan allows. The image is 512x512 BC7, one mip, 2x2 tiles. One bind backs the whole level from memory A
+and a marker goes into each tile. Then come, each in its own queue operation: unbinding tile 1 alone, unbinding tile 2,
+moving tile 3 to memory B and writing it, and unbinding tile 0. After each step every tile is read through the image.
+A failing bind names its checkpoint. Wrong values do not stop the run, so `VERDICT REBIND_PATTERNS_OK` or
+`REBIND_PATTERNS_WRONG_DATA` reports them all. Unbound tiles must read zero, so run it on a driver whose unbound pages
+do not fault (`--unbound-access` passes), or a fault there hides the bind results.
 
 Allocations are capped at 128 MiB total, 10% of each heap, and a quarter of the currently reported free budget
 when `VK_EXT_memory_budget` is available. The large plan is skipped if its estimated backing/staging exceeds the
