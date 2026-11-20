@@ -6,6 +6,7 @@ Why apart: prepare.py holds the steps; this is what they run with. Not run on it
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -112,7 +113,14 @@ def crt_link(game: Path, cc: list[str], lib: Path, out: Path, obj: Path, inputs:
 def default_glslc(game: Path) -> str:
     base = package_dir(game) / "glslc"
     exe = base / ("glslc.exe" if os.name == "nt" else "bin/glslc")
-    return str(exe) if exe.is_file() else "glslc"
+    if exe.is_file():
+        return str(exe)
+    if sys.platform == "darwin":
+        sdk = os.environ.get("VULKAN_SDK")
+        search = os.pathsep.join(filter(None, [str(Path(sdk) / "bin") if sdk else None,
+                                               os.environ.get("PATH"), "/usr/local/bin"]))
+        return shutil.which("glslc", path=search) or "glslc"
+    return "glslc"
 
 
 def tool_env(glslc: str) -> dict[str, str]:

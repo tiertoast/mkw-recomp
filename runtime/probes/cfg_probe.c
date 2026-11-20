@@ -135,7 +135,11 @@ int probe_cfg(void) {
     const CfgMeta *m = cfg_meta("MOTION");
     CHECK(m && EQ(m->def, "1") && m->live, "meta: motion defaults to 1 and is live");
     m = cfg_meta("ASYNC_PREEMPT");
-    CHECK(m && EQ(m->values, "0|1|2") && !m->live, "meta: async_preempt takes 0|1|2 and needs a restart");
+#ifdef __APPLE__
+    CHECK(m && EQ(m->def, "2") && EQ(m->values, "0|2") && !m->live, "meta: Darwin cooperative preemption");
+#else
+    CHECK(m && EQ(m->def, "1") && EQ(m->values, "0|1|2") && !m->live, "meta: async_preempt requires restart");
+#endif
     m = cfg_meta("mkw_vk_present");
     CHECK(m && EQ(m->key, "VK_PRESENT") && EQ(m->values, "mailbox|fifo|immediate") && m->live,
           "meta: prefix and case are accepted");
