@@ -15,6 +15,8 @@ VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse
 VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --tiled-control
 # Independent large control: 68 layers, 5 mips, no opaque bindings:
 VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --large-tiled-control
+# Resource-size control: 32 layers, 5 tiled mips, within the declared resource limit:
+VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --resource-size-control
 ```
 
 Or compile directly with Apple Clang:
@@ -56,6 +58,17 @@ tail offset is unused when no tail needs backing. Range/alignment checks remain 
 Logs classify requirements incompatibility as `REQUIREMENTS_CONFORMANCE`, separately from `GPU_OPERATION`,
 `GPU_DATA_MISMATCH`, `VALIDATION`, other API results and probe checks. A conformity failure alone does not prove
 a GPU operation failed or explain a device loss in the application.
+
+`--resource-size-control` runs only 8192x8192, 32 layers, 5 mips with the same partial residency, no-tail
+eligibility, synchronization, layout and synthetic upload/readback checkpoints as the 68-layer tiled case.
+Every image mode now logs the theoretical BC7 payload (16 bytes per 4x4 block, all requested mips/layers),
+`maxResourceSize` and, after creation, `VkMemoryRequirements.size`. It returns an explained SKIP before
+creation if the payload exceeds the declared resource/sparse-address-space limit, or before allocation and
+queue work if the Vulkan requirements exceed either limit. Extent, layer, mip and sample limits are checked
+as well. Thus a formerly accepted 68-layer case can now SKIP on a device declaring a smaller resource limit.
+The allocation preflight separately logs planned backing and both staging buffers against the 128 MiB cap;
+per-heap and reported-free-budget checks remain enforced before every allocation. Resource size, virtual
+address reservation and physically allocated resident bytes are reported separately.
 
 Allocations are capped at 128 MiB total, 10% of each heap, and a quarter of the currently reported free budget
 when `VK_EXT_memory_budget` is available. The large plan is skipped if its estimated backing/staging exceeds the

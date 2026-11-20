@@ -231,6 +231,17 @@ static uint32_t dim(uint32_t w, uint32_t mip) { return w >> mip ? w >> mip : 1; 
 static uint32_t min32(uint32_t a, uint32_t b) { return a < b ? a : b; }
 static VkDeviceSize aligned(VkDeviceSize n, VkDeviceSize a) { return (n + a - 1) / a * a; }
 
+static VkDeviceSize bc7_image_bytes(const Image *i) {
+    VkDeviceSize bytes = 0;
+    // Tight BC7 payload for this square 2D array, including every requested mip and layer.
+    // Sparse residency does not reduce this resource-size comparison to the device's limit.
+    for (uint32_t mip = 0; mip < i->mips; mip++) {
+        VkDeviceSize blocks = ((VkDeviceSize)dim(i->width, mip) + 3) / 4;
+        bytes += blocks * blocks * 16;
+    }
+    return bytes * i->layers;
+}
+
 static void validate_requirements(Image *i) {
     start("requirements-consistency");
     // A second public query separates a malformed driver result from legacy-query handling.
@@ -428,6 +439,7 @@ static void transfers(Image *i, int read, int pattern) {
 static int run_image(uint32_t width, uint32_t layers, int large, int tiled_control) {
     scenario = large ? (tiled_control ? "8192x8192x68-large-tiled-control" : "8192x8192x68") :
         tiled_control ? "512x512x4-tiled-control" : "512x512x4";
+    if (large && tiled_control && layers == 32) scenario = "8192x8192x32-resource-size-control";
     Image *i = calloc(1, sizeof *i);
     require(i != NULL, "host allocation");
     i->width = width; i->layers = layers;
@@ -446,7 +458,8 @@ static int run_image(uint32_t width, uint32_t layers, int large, int tiled_contr
     VkResult r = vkGetPhysicalDeviceImageFormatProperties(gpu, ci.format, ci.imageType, ci.tiling, ci.usage, ci.flags, &fp);
     printf("API vkGetPhysicalDeviceImageFormatProperties -> %d\n", r);
     if (r == VK_ERROR_FORMAT_NOT_SUPPORTED || (r == VK_SUCCESS &&
-        (width > fp.maxExtent.width || width > fp.maxExtent.height || layers > fp.maxArrayLayers || i->mips > fp.maxMipLevels))) {
+        (width > fp.maxExtent.width || width > fp.maxExtent.height || layers > fp.maxArrayLayers ||
+         i->mips > fp.maxMipLevels || !(fp.sampleCounts & ci.samples)))) {
         printf("SKIP [%s] requested sparse BC7 shape unsupported\n", scenario); free(i); return 77;
     }
     result(r, "vkGetPhysicalDeviceImageFormatProperties");
@@ -454,6 +467,15 @@ static int run_image(uint32_t width, uint32_t layers, int large, int tiled_contr
            i->mips, (unsigned long long)fp.maxResourceSize);
     printf("LIMITS maxExtent=%ux%ux%u maxLayers=%u maxMips=%u sampleCounts=%#x\n", fp.maxExtent.width,
         fp.maxExtent.height, fp.maxExtent.depth, fp.maxArrayLayers, fp.maxMipLevels, fp.sampleCounts);
+    pass(); start("resource-size-preflight");
+    VkDeviceSize theoretical = bc7_image_bytes(i);
+    printf("RESOURCE_SIZE maxResourceSize=%llu theoreticalBC7=%llu vulkanRequirement=not-yet-queried bytes\n",
+        (unsigned long long)fp.maxResourceSize, (unsigned long long)theoretical);
+    if (theoretical > fp.maxResourceSize || theoretical > props.limits.sparseAddressSpaceSize) {
+        printf("SKIP [%s/%s] theoretical BC7 resource exceeds declared resource/address-space limit; "
+               "image not created, no allocation or queue work\n", scenario, checkpoint);
+        free(i); return 77;
+    }
     pass(); start("create-image");
     VK(vkCreateImage(device, &ci, NULL, &i->handle)); pass();
     start("memory-requirements");
@@ -465,17 +487,31 @@ static int run_image(uint32_t width, uint32_t layers, int large, int tiled_contr
         (unsigned long long)i->req.size, (unsigned long long)i->req.alignment, i->req.memoryTypeBits, i->nsparse,
         (unsigned long long)props.limits.sparseAddressSpaceSize);
     pass();
+    start("resource-size-requirements");
+    printf("RESOURCE_SIZE maxResourceSize=%llu theoreticalBC7=%llu vulkanRequirement=%llu bytes\n",
+        (unsigned long long)fp.maxResourceSize, (unsigned long long)theoretical, (unsigned long long)i->req.size);
+    if (i->req.size > fp.maxResourceSize || i->req.size > props.limits.sparseAddressSpaceSize) {
+        printf("SKIP [%s/%s] Vulkan memory requirements exceed declared resource/address-space limit; "
+               "no allocation or queue work\n", scenario, checkpoint);
+        vkDestroyImage(device, i->handle, NULL); free(i); return 77;
+    }
+    pass();
     if (large && tiled_control && !tiled_eligible(i)) {
         vkDestroyImage(device, i->handle, NULL); free(i); return 77;
     }
     validate_requirements(i);
     start("plan-residency"); plan(i, large); pass();
     if (large && tiled_control) conformance_require(!i->ntails, "tiled-only plan unexpectedly contains opaque binds");
+    start("allocation-budget-preflight");
+    printf("BUDGET plannedBacking=%llu plannedStagingEach=%llu plannedTotal=%llu cap=%llu bytes; "
+           "heap/free-budget checks also enforced before every allocation\n", (unsigned long long)i->backing,
+           (unsigned long long)i->bytes, (unsigned long long)(i->backing + 2 * i->bytes), (unsigned long long)CAP);
     // Conservative preflight includes alignment slack for the two staging buffers and backing buffer.
     if (i->backing > CAP / 2 || i->bytes > (CAP - i->backing) / 2 - MIB) {
         puts("SKIP residency/transfers: planned memory exceeds conservative 128 MiB budget");
         vkDestroyImage(device, i->handle, NULL); free(i); return 77;
     }
+    pass();
     start("allocate-backing");
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = i->backing,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
@@ -532,8 +568,8 @@ static int run_image(uint32_t width, uint32_t layers, int large, int tiled_contr
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0); setvbuf(stderr, NULL, _IONBF, 0);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--application-shape") && strcmp(argv[1], "--tiled-control") &&
-        strcmp(argv[1], "--large-tiled-control"))) {
-        fprintf(stderr, "usage: %s [--application-shape | --tiled-control | --large-tiled-control]\n"
+        strcmp(argv[1], "--large-tiled-control") && strcmp(argv[1], "--resource-size-control"))) {
+        fprintf(stderr, "usage: %s [--application-shape | --tiled-control | --large-tiled-control | --resource-size-control]\n"
             "Set VK_DRIVER_FILES externally to the installed NVK manifest.\n", argv[0]);
         return 2;
     }
@@ -639,8 +675,11 @@ int main(int argc, char **argv) {
     VK(vkCreateSemaphore(device, &si, NULL, &timeline)); pass();
     int tiled_control = argc == 2 && !strcmp(argv[1], "--tiled-control");
     int large_tiled_control = argc == 2 && !strcmp(argv[1], "--large-tiled-control");
-    int status = large_tiled_control ? run_image(8192, 68, 1, 1) : run_image(512, 4, 0, tiled_control);
-    if (!status && argc == 2 && !tiled_control && !large_tiled_control) status = run_image(8192, 68, 1, 0);
+    int resource_size_control = argc == 2 && !strcmp(argv[1], "--resource-size-control");
+    int status = resource_size_control ? run_image(8192, 32, 1, 1) :
+        large_tiled_control ? run_image(8192, 68, 1, 1) : run_image(512, 4, 0, tiled_control);
+    if (!status && argc == 2 && !tiled_control && !large_tiled_control && !resource_size_control)
+        status = run_image(8192, 68, 1, 0);
     scenario = "device"; start("teardown");
     vkDestroySemaphore(device, timeline, NULL); vkDestroyFence(device, fence, NULL);
     vkDestroyCommandPool(device, pool, NULL); vkDestroyDevice(device, NULL);
