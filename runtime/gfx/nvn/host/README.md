@@ -6,7 +6,7 @@ the texts the host shows.
 | File | What it is |
 |---|---|
 | `gfx.h`, `gfx_null.c` | Graphics layer interface, null back end (no GPU) and `gfx_backend`, which picks the back end and wraps it with the capture of `../cap/` (`MKW_CAPTURE`) |
-| `gfx_present.c`, `gfx_wsys.h`, `gfx_window_sdl.c` | Swapchain, present and vsync; SDL3 window |
+| `gfx_present.c`, `gfx_wsys.h`, `gfx_window_sdl.c` | Swapchain, present and vsync. On Darwin the process's main thread initializes Cocoa on demand, runs the SDL event loop and publishes window state. The runtime runs on a worker. Linux and Windows use a dedicated SDL window thread. |
 | `gfx_hdr.c` | HDR output (`MKW_HDR` auto/off): what nn::vi tells the game about the display's HDR (`MKW_HDR_FAKE`), the HDR10 swapchain format and metadata, and 10-bit PQ pixels to sRGB bytes for shots, captures and thumbnails |
 | `gfx_shader.c` | Loads MKW's prepared SPIR-V (`prepared_get`, key `nvn2_program_key`) into the memory cache; loads the pipeline prewarm shaders in parallel (`gfx_shader_prewarm`); frees the SPIR-V only the prewarm read (`gfx_shader_spirv_release`) and reads it again from its file if a draw asks |
 | `gfx_shader_int.c` | A prepared shader's variants with integer inputs, integer outputs or integer images; failed integer-image conversions name the program and reason and save their input with `MKW_SPIRV_INT_DUMP` |

@@ -19,6 +19,9 @@
 #include "platform/platform.h"
 #include "presence.h"
 #include "version.h"
+#ifdef __APPLE__
+#include "gfx_wsys.h"
+#endif
 
 #define SYM_INIT_START "_ZN2nn4init5StartEmmPFvvES2_S2_"
 // The first nvnBootstrapLoader call (version.c nvn_ret: 1.0.0 main+0xcf3a5c in the graphics bring-up main+0xcf39b4,
@@ -367,7 +370,11 @@ static void lock_profile(void) {
     snprintf(p, sizeof p, "%s/instance.lock", rt_config()->profile_base);
     if (plat_file_lock(p)) return;   // -1 (cannot open it): played as before, without the guard
     const char *msg = "Mario Kart World is already running from this folder. Close it before starting it again.";
+#ifdef __APPLE__
+    wsys_show_boot_error(msg);
+#else
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "mkw-recomp", msg, NULL);
+#endif
     rt_fatal("boot: %s (%s is held)", msg, p);
 }
 
