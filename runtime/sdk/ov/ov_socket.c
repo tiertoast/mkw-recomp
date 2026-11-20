@@ -475,12 +475,14 @@ static void ov_recvfrom(Cpu *c) {
     }
     struct sockaddr_in a;
     socklen_t alen = sizeof a;
-    mem_commit_range(arg_x(c, 1), arg_x(c, 2));
+    // The kernel writes the buffer: committed (lazy commit), thawed and announced to Darwin's write watch, as file reads.
+    mem_kernel_write(arg_x(c, 1), arg_x(c, 2));
 #ifdef _WIN32
     int n = recvfrom(sl.s, arg_p(c, 1), (int)arg_x(c, 2), hf, (struct sockaddr *)&a, &alen);
 #else
     ssize_t n = recvfrom(sl.s, arg_p(c, 1), (size_t)arg_x(c, 2), hf | MSG_DONTWAIT, (struct sockaddr *)&a, &alen);
 #endif
+    mem_kernel_wrote(arg_x(c, 1), arg_x(c, 2));
     if (n < 0) fail(host_errno());
     else addr_out(&a, arg_p(c, 4), arg_p(c, 5));
     ret_x(c, (uint64_t)(int64_t)n);

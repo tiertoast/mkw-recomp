@@ -1,4 +1,5 @@
-// The conservative Mach VM backend never retries a protection fault. Report synchronous faults in mkw's text only.
+// Report synchronous faults in mkw's text only. The only protection faults that are retried are the write watch's
+// (darwin_mem.c): its handler, once installed, owns SIGBUS/SIGSEGV and sends every other fault here.
 #include "platform.h"
 #include "darwin_context.h"
 #include <mach-o/dyld.h>
@@ -36,6 +37,25 @@ static void fault(int sig, siginfo_t *si, void *context) {
     sigemptyset(&def.sa_mask);
     sigaction(sig, &def, NULL);
     if (!synchronous) raise(sig);
+}
+
+void darwin_crash_forward(int sig, siginfo_t *si, void *context, const struct sigaction *prior) {
+    if (report) {
+        fault(sig, si, context);
+        return;
+    }
+    if (prior && (prior->sa_flags & SA_SIGINFO) && prior->sa_sigaction) {
+        prior->sa_sigaction(sig, si, context);
+        return;
+    }
+    if (prior && prior->sa_handler != SIG_DFL && prior->sa_handler != SIG_IGN) {
+        prior->sa_handler(sig);
+        return;
+    }
+    // As fault(): the default action records the real fault when the instruction runs again.
+    struct sigaction def = {.sa_handler = SIG_DFL};
+    sigemptyset(&def.sa_mask);
+    sigaction(sig, &def, NULL);
 }
 
 void plat_crash_hook(void (*fn)(const PlatCrash *)) {

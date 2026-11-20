@@ -212,7 +212,9 @@ static inline void *plat_casp(void *volatile *p, void *xchg, void *cmp) {
 
 // ---- virtual memory: ranges reserved at fixed addresses below 2^39, their pages committed, decommitted and protected
 // at 4 KiB granularity.
-// Darwin leaves protection faults to the OS. Callers must not arm optional watches or register retry hooks there.
+// Darwin does not retry protection faults for the hooks below (thaws, read traps, lazy commit): callers must not arm
+// those or register retry hooks there. Its write watch is its own (darwin_mem.c): a reservation made with watch set
+// takes write faults in a handler of the platform, which makes the page writable and lets the write run again.
 #ifdef __APPLE__
 #define PLAT_CAN_RETRY_FAULT 0
 #else
@@ -244,6 +246,17 @@ int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end);
 // The pages of a watched reservation written since the last reset, up to max page addresses into pages, in address
 // order; reset: those reported start over as unwritten. UINT64_MAX when writes to the range are not tracked.
 uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset);
+// The kernel is about to write [addr, addr + n) of guest memory (a file read into a guest buffer), and has written it
+// at plat_mem_wrote: a pair around one synchronous call. Where the write watch protects pages in user space (Darwin), a
+// kernel write into a protected page fails (EFAULT) instead of faulting, so the watched pages there are counted as
+// written and kept writable between the two: a report meanwhile lists them once, as for any write, but does not
+// protect them again until plat_mem_wrote. Elsewhere both do nothing. plat_mem_will_write: 1 on success.
+int plat_mem_will_write(uint64_t addr, uint64_t n);
+void plat_mem_wrote(uint64_t addr, uint64_t n);
+// The write watch's counters since start: write faults taken, ns spent in them, pages reported written, pages
+// protected again, faults on hot pages (written at each of the last few reports), calls that protected pages again. 0
+// (and nothing written) where the platform has no counters of its own.
+int plat_mem_watch_stats(uint64_t out[6]);
 // Runs of pages in [addr, addr + n) that hold data (present or swapped out, not the shared zero page), up to max
 // {start, end} pairs into runs, in address order; no write-watch state changes. UINT64_MAX where the platform cannot
 // tell (Windows). The capture of runtime/gfx/cap reads only these: the rest of a reservation reads zero.

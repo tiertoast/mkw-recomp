@@ -4,10 +4,10 @@
 |---|---|
 | `darwin_thread.c`, `darwin_sync.c` | Native pthread handles, monotonic time, shared/exclusive locks and condition variables on public Darwin address waits |
 | `darwin_fiber.c`, `darwin_switch.S`, `darwin_context.h` | Guarded movable x86_64 fiber stacks, Mach-O context switch and same-fiber nonlocal guest returns |
-| `darwin_mem.c` | Mach VM exact reservations, page-state ledger, demand-zero commit and atomic replacement on decommit. Protected accesses follow the OS fault disposition |
+| `darwin_mem.c` | Mach VM exact reservations, page-state ledger, demand-zero commit and atomic replacement on decommit. The write watch of watched reservations (`MKW_WRITE_WATCH=1`, memory.c): clean read-write pages are read-only in fact, the first write faults into its handler, which makes the page writable and marks it written; other protected accesses follow the OS fault disposition |
 | `darwin_process.c` | Process identity, self-spawn and re-exec, randomness and dyld lookup |
 | `darwin_time.c` | Wall time and standard offset through libc, system zone and preferences through CoreFoundation |
-| `darwin_crash.c` | Alternate signal stacks and terminal diagnostics for faults inside the executable |
+| `darwin_crash.c` | Alternate signal stacks and terminal diagnostics for faults inside the executable; the faults the write watch's handler does not own are passed on here |
 | `darwin_load.c` | Mach CPU and memory counters and optional IOKit GPU statistics |
 | `darwin_ipc.c` | Local stream sockets with nonblocking connect and receive |
 | `darwin_desktop.c` | SDL clipboard, Finder URLs, CoreText outline fonts and executable desktop shortcuts |

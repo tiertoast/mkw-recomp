@@ -207,6 +207,17 @@ static void perf_gpu_line(uint64_t frame, double interval_ms, double pace_share,
     rt_log("perf: frame %llu: %s; fence wait per frame: render thread %.2f ms, other threads %.2f ms; %s; ram working set "
            "%.0f MiB, private %.0f MiB; bound: %s",
            (unsigned long long)frame, gs, rw, ow, vs, ws, priv, bound);
+    // Darwin's write watch costs a fault per page written after each report: its share of these frames (darwin_mem.c).
+    static uint64_t ww_last[6];
+    uint64_t ww[6];
+    if (plat_mem_watch_stats(ww)) {
+        rt_log("perf: frame %llu: write watch: %llu faults (%llu on hot pages), %.2f ms in them; %llu pages reported "
+               "written, %llu protected again in %llu calls", (unsigned long long)frame,
+               (unsigned long long)(ww[0] - ww_last[0]), (unsigned long long)(ww[4] - ww_last[4]),
+               (ww[1] - ww_last[1]) / 1e6, (unsigned long long)(ww[2] - ww_last[2]),
+               (unsigned long long)(ww[3] - ww_last[3]), (unsigned long long)(ww[5] - ww_last[5]));
+        memcpy(ww_last, ww, sizeof ww);
+    }
 }
 
 // MKW_AB_INVERT=1 swaps the blocks (B A A B): a race's stretches are not equally heavy (sl-ab1, 06/11/2026: texture

@@ -173,6 +173,9 @@ int mem_frozen(uint64_t a);                                // the 2 MiB region o
 void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen regions over [a, a+n) writable again;
                                                            // before a kernel write (file read) into guest memory;
                                                            // commits the range first (mem_commit_range)
+void mem_kernel_write(uint64_t a, uint64_t n);             // before a kernel write into guest memory (a file read, a
+void mem_kernel_wrote(uint64_t a, uint64_t n);             // socket receive): mem_thaw and Darwin's write watch; and
+                                                           // after it. Always as a pair around one call
 void mem_commit_range(uint64_t a, uint64_t n);             // Windows' lazy commit (MKW_LAZY_COMMIT): the game's
                                                            // pages of [a, a+n) committed now, before something that
                                                            // does not fault into the handler reads or writes them
@@ -367,6 +370,7 @@ void rt_boot(void);                                        // boot.c
 // modules, registers its host functions, then seals (hostfn_seal, or implicitly at the first rt_call). Return the
 // process exit code.
 int probe_cfg(void);                                       // cfg_probe.c
+int probe_writewatch(void);                                // ww_probe.c
 int probe_loader(void), probe_kernel(void), probe_audio(void), probe_services(void), probe_fs(void);
 int probe_gfx_abi(void);                                   // gfx_abi_probe.c
 int probe_vkdevice(void);                                 // vk_device.c

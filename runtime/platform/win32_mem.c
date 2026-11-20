@@ -68,6 +68,11 @@ int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end) {
 // no such query, but the guest's memory is committed when first touched (plat_mem_lazy_hook), so a committed page is
 // one the game or the runtime used. A committed page never written reads as zeros, as a Linux page never touched. It
 // lets the frame capture (gfx/cap) run on Windows.
+// GetWriteWatch counts kernel writes as well: nothing to do before them.
+int plat_mem_will_write(uint64_t addr, uint64_t n) { (void)addr, (void)n; return 1; }
+void plat_mem_wrote(uint64_t addr, uint64_t n) { (void)addr, (void)n; }
+int plat_mem_watch_stats(uint64_t out[6]) { (void)out; return 0; }
+
 uint64_t plat_mem_populated(uint64_t addr, uint64_t n, uint64_t (*runs)[2], uint64_t max) {
     uint64_t got = 0;
     for (uint64_t at = addr, end = addr + n; at < end && got < max;) {
