@@ -75,7 +75,7 @@ import build  # (GEN_FLAGS, module_glue, game_id: the same game code as build.py
 import game_texts  # (build_all: the game's texts in ca, gl, eu)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gamecode import DamagedSource, compile_game
+from gamecode import DamagedSource, compile_game, module_id
 from gamesource import check, is_nx, loose_romfs, unpack
 from gamecopy import BUILD_BYTES, check_space, clear_dir, copy_tree, own_dir, remove_stale, romfs_bytes, tree_bytes
 from nup import Nup
@@ -267,7 +267,8 @@ def main() -> None:
     ap.add_argument("--jobs", type=int, default=0, help="parallel jobs (default: from cores and memory)")
     ap.add_argument("--cc", help="the C compiler command (default: the package's zig cc, else clang)")
     ap.add_argument("--glslc", help="(default: the package's, else glslc on PATH)")
-    ap.add_argument("--target", choices=("linux", "windows"), default="windows" if os.name == "nt" else "linux")
+    ap.add_argument("--target", choices=("linux", "windows", "macos-x86_64"),
+                    default="windows" if os.name == "nt" else "macos-x86_64" if sys.platform == "darwin" else "linux")
     ap.add_argument(
         "--next",
         action="store_true",
@@ -357,6 +358,8 @@ def main() -> None:
     work = game / "setup-work"
     try:
         emit("step", "check")
+        if args.cc and args.target == "macos-x86_64":
+            raise Failed("macos-x86_64 uses Apple Clang from the selected Xcode toolchain (DEVELOPER_DIR)")
         cc = args.cc.split() if args.cc else default_cc(game, args.target)
         exefs_src, romfs_src, version = check(src, game, runtime)
         romfs = game / "romfs" if args.romfs == "copy" else romfs_src
@@ -371,7 +374,7 @@ def main() -> None:
             "exefs": str(exefs_src),
             "romfs": f"copy {version.name}" if args.romfs == "copy" else f"link {romfs_src}",
             "generate": f"{build.game_id()} {version.name} {code_key(GENERATOR)}{with_mods}",
-            "compile": f"{build.game_id()} {version.name} {args.target} {code_key(COMPILER)}{with_mods}",
+            "compile": f"{module_id(args.target)} {version.name} {args.target} {code_key(COMPILER)}{with_mods}",
             "shaders": f"{version.name} {translator_key()}",
             # with the shaders' key: the prewarm builds the libraries of this SPIR-V (an update that changed only the
             # translator skipped it and left the new libraries to the first start)
@@ -384,6 +387,10 @@ def main() -> None:
             "shaders": f"{exefs_src} {romfs_src} {translator_key()}",
             "warm": f"{build.game_id()} {romfs_src}",
         })  # fmt: skip
+        if args.target == "macos-x86_64":
+            stamp = dest / "mkwgame.id"
+            if not (dest / "mkwgame.dylib").is_file() or not stamp.is_file() or stamp.read_bytes() != module_id(args.target).encode():
+                state["done"].pop("compile", None)
         regenerate_if_cleaned(state, keys, work)
         redo_exefs_if_missing(state, game)
         # The room the steps to come take: the RomFS copy less what a cut one left, and the game's build the first
@@ -474,13 +481,13 @@ def main() -> None:
                 generate(game / "exefs", work, gen_jobs, version, image)
             elif step == "compile":
                 try:
-                    compile_game(game, game / "exefs", work, cc, args.target, jobs, dest)
+                    compile_game(game, game / "exefs", work, cc, args.target, jobs, dest, runtime)
                 except DamagedSource as e:  # once: a second damaged write is the disk or the memory, not chance
                     print(f"{e}: generating again", file=sys.stderr)
                     emit("step", "generate")
                     generate(game / "exefs", work, gen_jobs, version, image)
                     emit("step", "compile")
-                    compile_game(game, game / "exefs", work, cc, args.target, jobs, dest)
+                    compile_game(game, game / "exefs", work, cc, args.target, jobs, dest, runtime)
             elif step == "shaders":
                 beside.join(show=True)
             elif step == "warm":

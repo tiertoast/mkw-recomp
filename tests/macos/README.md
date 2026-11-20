@@ -148,3 +148,6 @@ The process fixture verifies a re-exec retaining its PID, merged output and its 
 child with the pipe still open, and system versus explicit-path library lookup.
 
 `backend.c` (`darwin-backend-test`, CTest `darwin-backend`) checks local IPC, pthread priorities and timing, telemetry, and terminal handling of Mach VM protection faults in isolated children.
+
+`setup_module.py` runs with `python tests/macos/setup_module.py RUNTIME_DIR FOUNDATIONS_EXE` with matching native builds to exercise
+the setup compiler, synthetic host calls and runtime rejection of an incompatible module.

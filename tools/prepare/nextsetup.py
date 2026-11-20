@@ -20,7 +20,7 @@ from pathlib import Path
 
 NEXT = "setup-next"
 STATE = "setup-state.json"
-OUTPUTS = ("mkwgame.so", "mkwgame.dll", "mkwgame.dll.pdb", "mkwgame.id", "pipeline-pairs.bin", "spirv")  # with STATE
+OUTPUTS = ("mkwgame.dylib", "mkwgame.so", "mkwgame.dll", "mkwgame.dll.pdb", "mkwgame.id", "pipeline-pairs.bin", "spirv")  # with STATE
 # the warm step's (prepare.warm): copies, not links, since the runtime appends to the keys and rewrites the cache; the
 # mark is the prewarm's guard against a driver that dies in it (vk_pipe_keys.c prewarm_mark)
 WARMED = ("pipeline-cache.bin", "pipeline-keys.bin", "pipeline-keys.prewarm")
