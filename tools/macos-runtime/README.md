@@ -29,3 +29,10 @@ mkwgame.id, while the versioned host library stays beside mkw. To validate modul
 
 For the subsequent shader stage, supply a validated SM86 instructions.json in build/sm86 in the checkout or
 sm86 in the installation, plus native glslc. The spec generator's pinned NVIDIA tools target Linux and Windows.
+
+A Linux or Windows setup using the repository's pinned CUDA 12.8 tools produces the same input format:
+UTF-8 JSON from sm_86_instructions.txt, parser schema v2.6. Copy only instructions.json to one of the
+two paths above. Record the producing checkout and compare SHA-256 on both machines (Get-FileHash,
+sha256sum or shasum -a 256). The setup checks the decoder model and parser counts before starting the
+copy or compilation. These checks detect incompatible or incomplete catalogs; they cannot authenticate
+the generating machine. Keep NVIDIA-derived data outside git.

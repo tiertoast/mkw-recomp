@@ -61,7 +61,7 @@ def translator_hash(spec: Path = SPEC) -> str:
     files = sorted((ROOT / "sm86/translate").rglob("*.py")) + sorted((ROOT / "sm86/decode").rglob("*.py"))
     for f in [*files, ROOT / "tools/shaders/extract.py", ROOT / "tools/shaders/translate.py"]:
         h.update(f.read_bytes())
-    h.update(f"{spec.stat().st_size} {spec.stat().st_mtime_ns}".encode())
+    h.update(spec.read_bytes())
     h.update(str(os.environ.get("SM86_SPEC", "0") == "1").encode())  # glsl/core.py SPEC_ON
     return h.hexdigest()
 

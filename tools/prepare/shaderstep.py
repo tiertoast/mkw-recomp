@@ -46,8 +46,20 @@ def spec_loads(spec: Path) -> bool:
     import sass_spec  # noqa: PLC0415 - sm86/decode is not a package
 
     try:
-        sass_spec.Spec(str(spec))
-    except (ValueError, KeyError, TypeError) as e:
+        model = sass_spec.Spec(str(spec))
+        meta = model.meta
+        if meta["source"] != "sm_86_instructions.txt" or meta["schema_version"] != "v2.6":
+            raise ValueError("expected sm_86 input and the v2.6 parser schema")
+        counts = {
+            "variant_count": len(model.classes) - model.alternate_count,
+            "alternate_count": model.alternate_count,
+            "enum_table_count": len(model.enum_tables),
+            "bit_slot_catalog_count": len(model.slots),
+            "table_count": len(model.tables),
+        }
+        if any(meta[key] != actual for key, actual in counts.items()):
+            raise ValueError("parser counts disagree with the decoded catalog")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError) as e:
         print(f"{spec} is broken ({type(e).__name__}: {str(e)[:200]}): building it again", flush=True)
         return False
     return True
@@ -83,13 +95,14 @@ def shaders(
     dest: Path | None = None,
     before_translate: Callable[[], None] = lambda: None,
     on_progress: Callable[[str], None] | None = None,
+    spec: Path | None = None,
 ) -> None:
     """spirv/ and pipeline-pairs.bin into dest (default the game folder; prepare.py --next: setup-next/).
     before_translate waits for what translate.py must not run beside (run beside generate, beside.py: generate's
     workers, and setup-next/spirv's links); jobs is asked then, from the memory free at that moment."""
     dest = dest or game
     dest.mkdir(parents=True, exist_ok=True)
-    spec = sm86_spec(game, work, cc)
+    spec = spec or sm86_spec(game, work, cc)
     sh = work / "shaders"
     run([sys.executable, str(ROOT / "tools/shaders/extract.py"), "--romfs", str(romfs), "--exefs", str(exefs),
          "--out", str(sh)])  # fmt: skip

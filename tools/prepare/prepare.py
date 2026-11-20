@@ -94,7 +94,7 @@ from machine import (
 )
 import nextsetup
 from beside import Beside
-from shaderstep import shaders, shipped, spec_command, translator_key  # noqa: F401  (spec_command: tests/launcher/test_setup.py)
+from shaderstep import shaders, shipped, sm86_spec, spec_command, translator_key  # noqa: F401  (spec_command: tests/launcher/test_setup.py)
 import update  # (ca_file)
 
 PREP_VERSION = 1  # bump when a step's output changes meaning: every step runs again
@@ -361,6 +361,13 @@ def main() -> None:
         if args.cc and args.target == "macos-x86_64":
             raise Failed("macos-x86_64 uses Apple Clang from the selected Xcode toolchain (DEVELOPER_DIR)")
         cc = args.cc.split() if args.cc else default_cc(game, args.target)
+        spec = None
+        shader_key = translator_key()
+        if args.target == "macos-x86_64":
+            spec = sm86_spec(game, work, cc)
+            if not shutil.which(glslc):
+                raise Failed(f"Darwin setup cannot find executable glslc: {glslc}")
+            shader_key += " " + hashlib.sha256(spec.read_bytes()).hexdigest()
         exefs_src, romfs_src, version = check(src, game, runtime)
         romfs = game / "romfs" if args.romfs == "copy" else romfs_src
         # The version (from exefs/main's build id) says which game a step built from; the folder only matters to the
@@ -375,10 +382,10 @@ def main() -> None:
             "romfs": f"copy {version.name}" if args.romfs == "copy" else f"link {romfs_src}",
             "generate": f"{build.game_id()} {version.name} {code_key(GENERATOR)}{with_mods}",
             "compile": f"{module_id(args.target)} {version.name} {args.target} {code_key(COMPILER)}{with_mods}",
-            "shaders": f"{version.name} {translator_key()}",
+            "shaders": f"{version.name} {shader_key}",
             # with the shaders' key: the prewarm builds the libraries of this SPIR-V (an update that changed only the
             # translator skipped it and left the new libraries to the first start)
-            "warm": f"{build.game_id()} {version.name} {translator_key()}",
+            "warm": f"{build.game_id()} {version.name} {shader_key}",
         }
         migrate_keys(state, keys, {
             "romfs": f"{args.romfs} {romfs_src}",
@@ -415,7 +422,7 @@ def main() -> None:
             # extract.py reads a .nup itself; a .nx's shader archives are unpacked first
             src_romfs = loose_romfs(runtime, romfs, work, "Shader", *SHADER_DIRS) if is_nx(romfs) else romfs
             shaders(game / "exefs", src_romfs, game, work, glslc, lambda: args.jobs or shader_jobs(share), cc, dest,
-                    before_translate, b.progress)  # fmt: skip
+                    before_translate, b.progress, spec)  # fmt: skip
 
         for step in STEPS[1:]:
             if step == "generate" and state["done"].get("shaders") != keys["shaders"]:
