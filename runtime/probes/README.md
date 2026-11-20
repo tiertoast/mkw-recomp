@@ -3,6 +3,56 @@
 Self-tests of each subsystem, one command-line option each (`build/mkw --probe-…`). They come from totk-pc-recomp
 except `texpre_probe.c`, `fg_probe.c`, `fps_probe.c`, `discord_probe.c`, `clk_probe.c` and `dsu_probe.c`.
 
+`vk_sparse_probe.c` is a standalone Vulkan diagnostic, built independently by this folder's `CMakeLists.txt`.
+Unlike the runtime probes below it needs no game setup, guest memory, SDL, VMA or shaders. The normal runtime's
+recursive source discovery compiles it without its standalone definition, so it contributes no entry point.
+
+```sh
+cmake -S runtime/probes -B build/vk-sparse -DVulkan_ROOT=/usr/local -DCMAKE_OSX_ARCHITECTURES=x86_64
+cmake --build build/vk-sparse
+VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --application-shape
+# Independent control with two tiled mips, without mip-tail backing:
+VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --tiled-control
+```
+
+Or compile directly with Apple Clang:
+
+```sh
+mkdir -p build/vk-sparse
+clang -std=c11 -Wall -Wextra -Werror -DMKW_STANDALONE_SPARSE_PROBE -I/usr/local/include \
+  runtime/probes/vk_sparse_probe.c -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lvulkan \
+  -o build/vk-sparse/vk-sparse-probe
+```
+
+The caller selects the existing ICD; the probe never changes it and requires an NVK device. Khronos validation,
+debug utils and synchronization validation are mandatory (set `VK_LAYER_PATH` if the SDK needs it). No GPU work
+is registered with CTest or CI. Run with an external 60-second process timeout as well as the internal 5-second
+fence waits: a driver entry point itself can block. Output is unbuffered. Exit codes are 0 PASS, 1 FAIL, 77 SKIP,
+and 2 for invalid arguments. Stop at the first failing Vulkan result, validation error, malformed requirement,
+timeout or data mismatch; on failure process teardown releases resources without further device waits.
+
+The default case is a fully resident 512x512 BC7 UNORM array, 4 layers, 10 mips. Both sparse-requirements APIs
+are cross-checked and mip-tail ranges checked before any allocation/bind. Separate checkpoints cover standard
+`vkAllocateMemory`, compatible backing-buffer zero fill, tile binds, opaque mip tails (including metadata when
+reported), image initialization, layout transitions and per-mip upload/readback of two generated BC7 mode-6
+patterns. Every queue operation uses a chained timeline semaphore and an independently checked fence. Transfers
+compare compressed bytes; shader sampling and decoded colour are outside this test.
+
+`--application-shape` runs the small case first, then, only if it passes, queries/creates 8192x8192 with 68 layers
+and 14 mips. The large case binds one tile per non-tail mip/layer, copies at most a 32x32 patch within that tile,
+and fully backs/transfers the mip tails. Other tiles stay untouched. It compares the application's virtual shape
+without allocating its full residency. `--tiled-control` instead runs only 512x512, 4 layers, 2 mips; it is an
+explicit independent diagnostic, never an automatic fallback or a renderer setting.
+
+Allocations are capped at 128 MiB total, 10% of each heap, and a quarter of the currently reported free budget
+when `VK_EXT_memory_budget` is available. The large plan is skipped if its estimated backing/staging exceeds the
+cap; later allocation-budget failures stop the run. Requested live/peak allocation bytes, heap sizes and optional
+driver budget/usage are printed; these do not measure all driver overhead. Flags match the sparse renderer
+(`SPARSE_BINDING`, `SPARSE_RESIDENCY`, `SPARSE_ALIASED`), but the test uses unique memory for each tile, no
+NVN virtual pools, no actual tile sharing/rebinding and no concurrent upload batch. It takes API granularity
+verbatim rather than applying `vk_sparse.c`'s vendor compatibility conversion. Machine-specific results and
+investigation logs belong in the PR, not in this directory.
+
 | File | Option | What it checks |
 |---|---|---|
 | `astc_probe.c` | `--probe-astc` | The compute ASTC decoder (`vk_astc.c`) against the CPU one, bit for bit, with synthetic blocks; the BC7 and BC1 re-encoders, transparent texels keeping alpha 0 exactly |
