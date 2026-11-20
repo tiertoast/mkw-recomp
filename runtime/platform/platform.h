@@ -254,9 +254,10 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
 int plat_mem_will_write(uint64_t addr, uint64_t n);
 void plat_mem_wrote(uint64_t addr, uint64_t n);
 // The write watch's counters since start: write faults taken, ns spent in them, pages reported written, pages
-// protected again, faults on hot pages (written at each of the last few reports), calls that protected pages again. 0
+// protected again, faults on hot pages (written at each of the last few reports), calls that protected pages again,
+// faults soon after the page was protected again (rewritten every frame). 0
 // (and nothing written) where the platform has no counters of its own.
-int plat_mem_watch_stats(uint64_t out[6]);
+int plat_mem_watch_stats(uint64_t out[7]);
 // Runs of pages in [addr, addr + n) that hold data (present or swapped out, not the shared zero page), up to max
 // {start, end} pairs into runs, in address order; no write-watch state changes. UINT64_MAX where the platform cannot
 // tell (Windows). The capture of runtime/gfx/cap reads only these: the rest of a reservation reads zero.

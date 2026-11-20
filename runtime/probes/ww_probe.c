@@ -40,7 +40,7 @@ static int same(const uint64_t *got, uint64_t n, const uint64_t *want, uint64_t 
 }
 
 static uint64_t faults(void) {
-    uint64_t s[6];
+    uint64_t s[7];
     return plat_mem_watch_stats(s) ? s[0] : 0;
 }
 
@@ -93,6 +93,27 @@ int probe_writewatch(void) {
     }
     CHECK(page(3)[5] == 1 && page(3)[7] == 5 && page(7)[10] == 3, "written bytes did not stay");
     written(0, 64, got, 64, 1);
+
+    // 2b. A page rewritten right after each report (Darwin: a quick fault, < 40 ms after it was protected again) turns
+    // hot: it stays writable and every report lists it, written or not, until it is protected again after a while.
+    if (f0 || f1 || f2) {
+        uint64_t h[64];
+        const uint64_t w120[] = {120};
+        for (int k = 0; k < 4; k++) page(120)[k] = (uint8_t)k, written(112, 128, h, 64, 1);
+        uint64_t fh = faults();
+        page(120)[9] = 9;
+        CHECK(faults() == fh, "a write to a hot page faulted");
+        n = written(112, 128, h, 64, 1);
+        CHECK(same(h, n, w120, 1), "a hot page reported %llu pages after a write", (unsigned long long)n);
+        n = written(112, 128, h, 64, 1);
+        CHECK(same(h, n, w120, 1), "a hot page reported %llu pages without a write", (unsigned long long)n);
+        for (int k = 0; k < 300; k++) written(112, 128, h, 64, 1);   // past the reports after which it is tried again
+        fh = faults();
+        page(120)[10] = 10;
+        CHECK(faults() == fh + 1, "a hot page tried again took %llu faults on a write, not 1",
+              (unsigned long long)(faults() - fh));
+        written(112, 128, h, 64, 1);
+    }
 
     // 3. max truncates; only what was reported is reset.
     for (uint64_t i = 10; i < 15; i++) page(i)[0] = (uint8_t)i;
@@ -198,7 +219,7 @@ int probe_writewatch(void) {
 
     // 7. The cost of a write fault: the first write to each of COST_PAGES committed pages, then the same writes again.
     if (plat_mem_commit(base + 128 * PG, COST_PAGES * PG)) {
-        uint64_t s0[6] = {0}, s1[6] = {0};
+        uint64_t s0[7] = {0}, s1[7] = {0};
         int stats = plat_mem_watch_stats(s0);
         uint64_t a = plat_now_ns();
         for (uint64_t i = 0; i < COST_PAGES; i++) page(128 + i)[0] = 1;

@@ -35,19 +35,28 @@ typedef struct Range {
     struct Range *next;
     uint64_t base, end;
     int guest, watch;
-    unsigned char *written;   // watch: per page WRITTEN since the last report with reset, CLEAN, or UNARMED (busy, reported)
+    unsigned char *written;   // watch: per page CLEAN, WRITTEN since the last report with reset, UNARMED or HOT
     uint16_t *busy;           // watch: per page, kernel writes in flight (lock held)
-    unsigned char *streak;    // watch: per page, reports in a row that found it written (0 when one found it clean)
+    unsigned char *quick;     // watch: per page, quick faults in a row (QUICK_MS)
+    uint32_t *armed_at;       // watch: per page, the ms (now_ms) it was last protected again; HOT: reports since
     unsigned char state[];
 } Range;
-enum { CLEAN, WRITTEN, UNARMED };
-#define HOT_STREAK 4   // a fault on a page written at each of this many reports in a row counts as hot
+// CLEAN: protected, not written since. WRITTEN: written, writable. UNARMED: reported while a kernel write is in flight,
+// writable until it ends. HOT: rewritten about every frame, so it stays writable and every report lists it, as written
+// or not; a fault and a protection call per frame cost ~10 times the copy that the callers make of it then (G5-L races,
+// 20/11/2026: 52-72% of ~6000 faults a frame while driving came < 40 ms after the page was protected again).
+enum { CLEAN, WRITTEN, UNARMED, HOT };
+#define QUICK_MS 40       // a fault this soon after the page was protected again is quick: a page rewritten every frame
+#define HOT_QUICK 2       // quick faults in a row that make a page hot
+#define HOT_REPORTS 256   // reports after which a hot page is protected again, to see whether it still is
+static mach_timebase_info_data_t timebase;
+static uint32_t now_ms(void) { return (uint32_t)(mach_absolute_time() * timebase.numer / timebase.denom / 1000000u); }
 static Range *ranges;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 // Write-watch counters (plat_mem_watch_stats): faults, mach_absolute_time ticks in them, pages reported, protected
-// again, faults on hot pages (HOT_STREAK), mach_vm_protect calls that protected pages again.
-static uint64_t ww_faults, ww_ticks, ww_reported, ww_armed, ww_hot, ww_arm_calls;
+// again, pages made hot, mach_vm_protect calls that protected pages again, quick faults.
+static uint64_t ww_faults, ww_ticks, ww_reported, ww_armed, ww_hot, ww_arm_calls, ww_quick;
 static int ww_on;
 static struct sigaction prior_bus, prior_segv;
 
@@ -85,10 +94,13 @@ static void ww_fault(int sig, siginfo_t *si, void *context) {
             mach_vm_protect(mach_task_self(), addr & ~(PAGE_BYTES - 1), PAGE_BYTES, FALSE, RW) == KERN_SUCCESS) {
             // Writable first, marked after: a report that runs between the two sees the page unwritten and leaves it
             // writable and marked, so the next report has it.
-            __atomic_store_n(&r->written[i], 1, __ATOMIC_RELEASE);
+            __atomic_store_n(&r->written[i], WRITTEN, __ATOMIC_RELEASE);
             __atomic_add_fetch(&ww_faults, 1, __ATOMIC_RELAXED);
-            if (__atomic_load_n(&r->streak[i], __ATOMIC_RELAXED) >= HOT_STREAK)
-                __atomic_add_fetch(&ww_hot, 1, __ATOMIC_RELAXED);
+            uint32_t at = __atomic_load_n(&r->armed_at[i], __ATOMIC_RELAXED);
+            int quick = at && now_ms() - at < QUICK_MS;
+            unsigned char q = __atomic_load_n(&r->quick[i], __ATOMIC_RELAXED);
+            __atomic_store_n(&r->quick[i], quick ? (unsigned char)(q < 255 ? q + 1 : 255) : 0, __ATOMIC_RELAXED);
+            if (quick) __atomic_add_fetch(&ww_quick, 1, __ATOMIC_RELAXED);
             __atomic_add_fetch(&ww_ticks, mach_absolute_time() - t0, __ATOMIC_RELAXED);
             return;
         }
@@ -100,6 +112,7 @@ static void ww_fault(int sig, siginfo_t *si, void *context) {
 static void ww_install(void) {
     struct sigaction action = {.sa_sigaction = ww_fault, .sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER};
     sigemptyset(&action.sa_mask);
+    mach_timebase_info(&timebase);
     sigaction(SIGBUS, &action, &prior_bus);
     sigaction(SIGSEGV, &action, &prior_segv);
     __atomic_store_n(&ww_on, 1, __ATOMIC_RELEASE);
@@ -111,9 +124,11 @@ static uint64_t new_range(mach_vm_address_t base, uint64_t n, int guest, int wat
     if (!r) return 0;
     // Zero-filled lazily by the kernel: only the pages of the maps that are touched cost memory.
     if (watch && (!(r->written = calloc(n / PAGE_BYTES, 1)) || !(r->busy = calloc(n / PAGE_BYTES, sizeof *r->busy)) ||
-                  !(r->streak = calloc(n / PAGE_BYTES, 1)))) {
+                  !(r->quick = calloc(n / PAGE_BYTES, 1)) ||
+                  !(r->armed_at = calloc(n / PAGE_BYTES, sizeof *r->armed_at)))) {
         free(r->written);
         free(r->busy);
+        free(r->quick);
         free(r);
         return 0;
     }
@@ -122,7 +137,8 @@ static uint64_t new_range(mach_vm_address_t base, uint64_t n, int guest, int wat
         pthread_mutex_unlock(&lock);
         free(r->written);
         free(r->busy);
-        free(r->streak);
+        free(r->quick);
+        free(r->armed_at);
         free(r);
         return 0;
     }
@@ -174,7 +190,10 @@ static int change(uint64_t addr, uint64_t n, Operation op, int prot) {
         // One kernel replacement, only inside our reservation. There is no unmap/reacquire window.
         mach_vm_address_t base = addr;
         ok = map_anon(&base, n, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, VM_PROT_NONE);
-        if (ok && r->watch) memset(r->written + first, 0, count);   // the pages are gone: nothing written there
+        if (ok && r->watch) {   // the pages are gone: nothing written there, nothing hot
+            memset(r->written + first, CLEAN, count);
+            memset(r->quick + first, 0, count);
+        }
     } else {
         vm_prot_t p = prot == PLAT_PROT_RW ? RW : prot == PLAT_PROT_READ ? VM_PROT_READ : VM_PROT_NONE;
         // Watched and read-write to the caller: read-only in fact until the first write, writable where already
@@ -273,6 +292,9 @@ static void arm_locked(Range *r, uint64_t i, uint64_t j) {
         == KERN_SUCCESS)
         __atomic_add_fetch(&ww_armed, j - i, __ATOMIC_RELAXED);
     __atomic_add_fetch(&ww_arm_calls, 1, __ATOMIC_RELAXED);
+    // The exact ms (0 means never): `| 1` stored the next ms half the time, and ww_fault's now - at then wrapped.
+    uint32_t t = now_ms();
+    for (t = t ? t : 1; i < j; i++) __atomic_store_n(&r->armed_at[i], t, __ATOMIC_RELAXED);
 }
 
 uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset) {
@@ -285,19 +307,28 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
         return UINT64_MAX;
     }
     for (i = first; i < first + count && got < max; i++) {
-        // ww_fault only marks CLEAN pages, and a WRITTEN or UNARMED one is writable, so it cannot fault: what is
-        // read here stays until the store below.
+        // ww_fault only marks CLEAN pages, and the others are writable, so they cannot fault: what is read here stays
+        // until the store below.
         int again = 0;
         unsigned char w = __atomic_load_n(&r->written[i], __ATOMIC_ACQUIRE);
-        if (reset)   // a hot page is written between every two reports
-            __atomic_store_n(&r->streak[i], w == WRITTEN ? (unsigned char)(r->streak[i] < 255 ? r->streak[i] + 1 : 255)
-                                           : w == CLEAN ? 0 : r->streak[i], __ATOMIC_RELAXED);
-        if (w == WRITTEN) {
+        int rw = r->state[i] == PLAT_PROT_RW + 1;   // read-only pages stay as the caller set them
+        if (w == HOT) {
+            pages[got++] = r->base + i * PAGE_BYTES;
+            if (reset && (++r->armed_at[i] >= HOT_REPORTS || !rw)) {   // cooled down? protected again to see
+                __atomic_store_n(&r->written[i], CLEAN, __ATOMIC_RELEASE);
+                r->quick[i] = 0;
+                again = rw;
+            }
+        } else if (w == WRITTEN) {
             pages[got++] = r->base + i * PAGE_BYTES;
             if (reset && r->busy[i]) __atomic_store_n(&r->written[i], UNARMED, __ATOMIC_RELEASE);   // until plat_mem_wrote
-            else if (reset) {
+            else if (reset && rw && r->quick[i] >= HOT_QUICK) {
+                __atomic_store_n(&r->written[i], HOT, __ATOMIC_RELEASE);
+                r->armed_at[i] = 0;
+                __atomic_add_fetch(&ww_hot, 1, __ATOMIC_RELAXED);
+            } else if (reset) {
                 __atomic_store_n(&r->written[i], CLEAN, __ATOMIC_RELEASE);
-                again = r->state[i] == PLAT_PROT_RW + 1;   // read-only pages stay as the caller set them
+                again = rw;
             }
         }
         if (again && run == UINT64_MAX) run = i;
@@ -349,7 +380,7 @@ void plat_mem_wrote(uint64_t addr, uint64_t n) {
     pthread_mutex_unlock(&lock);
 }
 
-int plat_mem_watch_stats(uint64_t out[6]) {
+int plat_mem_watch_stats(uint64_t out[7]) {
     if (!__atomic_load_n(&ww_on, __ATOMIC_ACQUIRE)) return 0;
     mach_timebase_info_data_t tb;
     mach_timebase_info(&tb);
@@ -359,6 +390,7 @@ int plat_mem_watch_stats(uint64_t out[6]) {
     out[3] = __atomic_load_n(&ww_armed, __ATOMIC_RELAXED);
     out[4] = __atomic_load_n(&ww_hot, __ATOMIC_RELAXED);
     out[5] = __atomic_load_n(&ww_arm_calls, __ATOMIC_RELAXED);
+    out[6] = __atomic_load_n(&ww_quick, __ATOMIC_RELAXED);
     return 1;
 }
 

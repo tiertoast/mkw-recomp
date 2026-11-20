@@ -237,7 +237,7 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
 // The asynchronous userfaultfd resolves kernel writes as well: nothing to do before them.
 int plat_mem_will_write(uint64_t addr, uint64_t n) { (void)addr, (void)n; return 1; }
 void plat_mem_wrote(uint64_t addr, uint64_t n) { (void)addr, (void)n; }
-int plat_mem_watch_stats(uint64_t out[6]) { (void)out; return 0; }
+int plat_mem_watch_stats(uint64_t out[7]) { (void)out; return 0; }
 
 uint64_t plat_mem_populated(uint64_t addr, uint64_t n, uint64_t (*runs)[2], uint64_t max) {
     if (!max || !n) return 0;
