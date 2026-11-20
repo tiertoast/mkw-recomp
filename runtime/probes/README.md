@@ -13,6 +13,8 @@ cmake --build build/vk-sparse
 VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --application-shape
 # Independent control with two tiled mips, without mip-tail backing:
 VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --tiled-control
+# Independent large control: 68 layers, 5 mips, no opaque bindings:
+VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --large-tiled-control
 ```
 
 Or compile directly with Apple Clang:
@@ -43,6 +45,17 @@ and 14 mips. The large case binds one tile per non-tail mip/layer, copies at mos
 and fully backs/transfers the mip tails. Other tiles stay untouched. It compares the application's virtual shape
 without allocating its full residency. `--tiled-control` instead runs only 512x512, 4 layers, 2 mips; it is an
 explicit independent diagnostic, never an automatic fallback or a renderer setting.
+
+`--large-tiled-control` runs only 8192x8192, 68 layers and 5 mips, independently of the small/full-chain cases.
+Before allocation or queue work it checks every sparse requirement: all requested color mips must precede the
+mip tail, and no metadata aspect may require opaque backing. Otherwise it returns 77 with the reason. It then
+uses the unchanged requirements-conformity checks, binds one tile at the origin of each mip/layer and transfers
+a patch up to 32x32 within each tile. No opaque binding is submitted and all other tiles remain untouched.
+Compare its log with a previous small control; invoking it does not rerun the small control. A special driver
+tail offset is unused when no tail needs backing. Range/alignment checks remain enforced for required tails.
+Logs classify requirements incompatibility as `REQUIREMENTS_CONFORMANCE`, separately from `GPU_OPERATION`,
+`GPU_DATA_MISMATCH`, `VALIDATION`, other API results and probe checks. A conformity failure alone does not prove
+a GPU operation failed or explain a device loss in the application.
 
 Allocations are capped at 128 MiB total, 10% of each heap, and a quarter of the currently reported free budget
 when `VK_EXT_memory_budget` is available. The large plan is skipped if its estimated backing/staging exceeds the

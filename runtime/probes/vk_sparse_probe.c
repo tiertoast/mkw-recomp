@@ -19,6 +19,7 @@
 
 static atomic_uint errors, warnings;
 static const char *checkpoint = "startup", *scenario = "device";
+static const char *failure_kind = "PROBE_CHECK";
 static VkInstance instance;
 static VkPhysicalDevice gpu;
 static VkPhysicalDeviceProperties props;
@@ -33,8 +34,8 @@ static uint64_t serial, live, peak, heap_live[VK_MAX_MEMORY_HEAPS];
 static int has_budget;
 
 static void fail(const char *why) {
-    fprintf(stderr, "FAIL [%s/%s] %s; validation errors=%u warnings=%u; live=%llu peak=%llu bytes\n",
-            scenario, checkpoint, why, atomic_load(&errors), atomic_load(&warnings),
+    fprintf(stderr, "FAIL [%s/%s] kind=%s %s; validation errors=%u warnings=%u; live=%llu peak=%llu bytes\n",
+            scenario, checkpoint, failure_kind, why, atomic_load(&errors), atomic_load(&warnings),
             (unsigned long long)live, (unsigned long long)peak);
     // On device loss/timeout, do not issue more work or wait indefinitely in device destruction.
     // OS process teardown releases resources, including partially constructed resources.
@@ -42,9 +43,22 @@ static void fail(const char *why) {
 }
 
 static void require(int condition, const char *why) { if (!condition) fail(why); }
+static void conformance_require(int condition, const char *why) {
+    if (condition) return;
+    failure_kind = "REQUIREMENTS_CONFORMANCE";
+    fprintf(stderr, "CONFORMANCE_FAILURE [%s/%s] incompatible public Vulkan requirements; "
+            "not evidence of a failed GPU operation; queue_operations_issued=%llu\n",
+            scenario, checkpoint, (unsigned long long)serial);
+    fail(why);
+}
 static void result(VkResult r, const char *api) {
     printf("API [%s/%s] %s -> %d\n", scenario, checkpoint, api, r);
-    if (r != VK_SUCCESS) fail(api);
+    if (r != VK_SUCCESS) {
+        failure_kind = r == VK_ERROR_DEVICE_LOST || r == VK_TIMEOUT || strstr(api, "vkQueue") ||
+            strstr(api, "vkWaitForFences") || strstr(api, "vkGetFenceStatus") ? "GPU_OPERATION" : "API_RESULT";
+        fail(api);
+    }
+    if (atomic_load(&errors)) failure_kind = "VALIDATION";
     require(!atomic_load(&errors), "validation error");
 }
 #define VK(call) result((call), #call)
@@ -53,6 +67,7 @@ static void start(const char *name) {
     printf("BEGIN [%s/%s]\n", scenario, checkpoint);
 }
 static void pass(void) {
+    if (atomic_load(&errors)) failure_kind = "VALIDATION";
     require(!atomic_load(&errors), "validation error");
     printf("PASS [%s/%s]\n", scenario, checkpoint);
 }
@@ -225,7 +240,7 @@ static void validate_requirements(Image *i) {
     uint32_t count = 8;
     for (uint32_t n = 0; n < 8; n++) check[n].sType = VK_STRUCTURE_TYPE_SPARSE_IMAGE_MEMORY_REQUIREMENTS_2;
     vkGetImageSparseMemoryRequirements2(device, &info, &count, check);
-    require(count == i->nsparse, "legacy/requirements2 count differs");
+    conformance_require(count == i->nsparse, "legacy/requirements2 count differs");
     for (uint32_t n = 0; n < count; n++) {
         const VkSparseImageMemoryRequirements *a = &i->sparse[n], *b = &check[n].memoryRequirements;
         printf("REQUIREMENTS2 aspect=%#x granularity=%ux%ux%u flags=%#x tailFirstLod=%u offset=%#llx size=%llu stride=%llu\n",
@@ -233,7 +248,7 @@ static void validate_requirements(Image *i) {
             b->formatProperties.imageGranularity.height, b->formatProperties.imageGranularity.depth,
             b->formatProperties.flags, b->imageMipTailFirstLod, (unsigned long long)b->imageMipTailOffset,
             (unsigned long long)b->imageMipTailSize, (unsigned long long)b->imageMipTailStride);
-        require(a->formatProperties.aspectMask == b->formatProperties.aspectMask &&
+        conformance_require(a->formatProperties.aspectMask == b->formatProperties.aspectMask &&
             a->formatProperties.imageGranularity.width == b->formatProperties.imageGranularity.width &&
             a->formatProperties.imageGranularity.height == b->formatProperties.imageGranularity.height &&
             a->formatProperties.imageGranularity.depth == b->formatProperties.imageGranularity.depth &&
@@ -245,19 +260,44 @@ static void validate_requirements(Image *i) {
         uint32_t tails = a->formatProperties.flags & VK_SPARSE_IMAGE_FORMAT_SINGLE_MIPTAIL_BIT ? 1 : i->layers;
         for (uint32_t layer = 0; layer < tails; layer++) {
             VkDeviceSize stride = tails == 1 ? 0 : a->imageMipTailStride;
-            require(!layer || stride <= (UINT64_MAX - a->imageMipTailOffset) / layer, "mip-tail offset overflow");
+            conformance_require(!layer || stride <= (UINT64_MAX - a->imageMipTailOffset) / layer, "mip-tail offset overflow");
             VkDeviceSize offset = a->imageMipTailOffset + layer * stride;
             if (offset >= i->req.size || a->imageMipTailSize > i->req.size - offset) {
                 fprintf(stderr, "INVALID_REQUIREMENTS aspect=%#x layer=%u tailOffset=%#llx tailSize=%llu imageSize=%llu; "
                     "opaque bind would violate VUID-VkSparseMemoryBind-resourceOffset-01099/size-01100; no bind submitted\n",
                     a->formatProperties.aspectMask, layer, (unsigned long long)offset,
                     (unsigned long long)a->imageMipTailSize, (unsigned long long)i->req.size);
-                fail("driver-reported mip-tail range is outside image memory requirements");
+                conformance_require(0, "driver-reported mip-tail range is outside image memory requirements");
             }
-            require(!(offset % i->req.alignment) && !(a->imageMipTailSize % i->req.alignment), "unaligned mip-tail range");
+            conformance_require(!(offset % i->req.alignment) && !(a->imageMipTailSize % i->req.alignment), "unaligned mip-tail range");
         }
     }
     pass();
+}
+
+static int tiled_eligible(const Image *i) {
+    start("tiled-only-eligibility");
+    uint32_t colors = 0;
+    for (uint32_t n = 0; n < i->nsparse; n++) {
+        const VkSparseImageMemoryRequirements *s = &i->sparse[n];
+        printf("TILED_REQUIREMENT aspect=%#x requestedMips=%u tailFirstLod=%u tailSize=%llu tailOffset=%#llx\n",
+            s->formatProperties.aspectMask, i->mips, s->imageMipTailFirstLod,
+            (unsigned long long)s->imageMipTailSize, (unsigned long long)s->imageMipTailOffset);
+        if (s->formatProperties.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT) {
+            colors++;
+            if (s->imageMipTailFirstLod >= i->mips) continue;
+            printf("SKIP [%s/%s] requested mip %u needs opaque tail binding; no allocation or queue work\n",
+                scenario, checkpoint, s->imageMipTailFirstLod);
+            return 0;
+        }
+        if (s->formatProperties.aspectMask == VK_IMAGE_ASPECT_METADATA_BIT && !s->imageMipTailSize) continue;
+        printf("SKIP [%s/%s] aspect %#x requires opaque metadata backing or is unsupported by tiled-only control\n",
+            scenario, checkpoint, s->formatProperties.aspectMask);
+        return 0;
+    }
+    conformance_require(colors == 1, "expected one color sparse requirement");
+    puts("TILED_ONLY all requested mips use tiles; opaque bindings unnecessary; unused tail offsets are not bound");
+    pass(); return 1;
 }
 
 static void plan(Image *i, int large) {
@@ -314,7 +354,9 @@ static void plan(Image *i, int large) {
     }
     printf("PLAN tileBinds=%u opaqueBinds=%u backing=%llu transfer=%llu bytes; %s\n", i->ntiles, i->ntails,
         (unsigned long long)i->backing, (unsigned long long)i->bytes,
-        large ? "one tile per non-tail mip/layer, complete mip tails; other tiles untouched" : "fully resident, all texels transferred");
+        large ? (i->ntails ? "one tile per non-tail mip/layer, complete mip tails; other tiles untouched" :
+                            "one tile per mip/layer, no opaque backing; other tiles untouched") :
+                "fully resident, all texels transferred");
 }
 
 static void transition(Image *i, VkImageLayout old, VkImageLayout next, const char *name) {
@@ -372,6 +414,7 @@ static void transfers(Image *i, int read, int pattern) {
                 if (i->readback.map[offset] != i->upload.map[offset]) {
                     fprintf(stderr, "MISMATCH mip=%u layer=%u byte=%llu got=%02x expected=%02x\n", mip,
                         c->imageSubresource.baseArrayLayer, (unsigned long long)b, i->readback.map[offset], i->upload.map[offset]);
+                    failure_kind = "GPU_DATA_MISMATCH";
                     fail("synthetic BC7 byte comparison");
                 }
             }
@@ -383,14 +426,15 @@ static void transfers(Image *i, int read, int pattern) {
 }
 
 static int run_image(uint32_t width, uint32_t layers, int large, int tiled_control) {
-    scenario = large ? "8192x8192x68" : tiled_control ? "512x512x4-tiled-control" : "512x512x4";
+    scenario = large ? (tiled_control ? "8192x8192x68-large-tiled-control" : "8192x8192x68") :
+        tiled_control ? "512x512x4-tiled-control" : "512x512x4";
     Image *i = calloc(1, sizeof *i);
     require(i != NULL, "host allocation");
     i->width = width; i->layers = layers;
     for (uint32_t w = width; w; w >>= 1) i->mips++;
     // Independent control: still BC7 + multiple layers/mips, without requiring mip-tail residency.
     // This is an explicit separate run, never an automatic fallback after a failed checkpoint.
-    if (tiled_control) i->mips = 2;
+    if (tiled_control) i->mips = large ? 5 : 2;
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .flags = VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT | VK_IMAGE_CREATE_SPARSE_ALIASED_BIT,
         .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_BC7_UNORM_BLOCK, .extent = {width, width, 1},
@@ -408,18 +452,25 @@ static int run_image(uint32_t width, uint32_t layers, int large, int tiled_contr
     result(r, "vkGetPhysicalDeviceImageFormatProperties");
     printf("IMAGE format=%d flags=%#x usage=%#x mips=%u maxResourceSize=%llu\n", ci.format, ci.flags, ci.usage,
            i->mips, (unsigned long long)fp.maxResourceSize);
+    printf("LIMITS maxExtent=%ux%ux%u maxLayers=%u maxMips=%u sampleCounts=%#x\n", fp.maxExtent.width,
+        fp.maxExtent.height, fp.maxExtent.depth, fp.maxArrayLayers, fp.maxMipLevels, fp.sampleCounts);
     pass(); start("create-image");
     VK(vkCreateImage(device, &ci, NULL, &i->handle)); pass();
     start("memory-requirements");
     vkGetImageMemoryRequirements(device, i->handle, &i->req);
     vkGetImageSparseMemoryRequirements(device, i->handle, &i->nsparse, NULL);
-    require(i->nsparse && i->nsparse <= 8 && i->req.alignment && i->req.memoryTypeBits, "invalid memory requirements");
+    conformance_require(i->nsparse && i->nsparse <= 8 && i->req.alignment && i->req.memoryTypeBits, "invalid memory requirements");
     vkGetImageSparseMemoryRequirements(device, i->handle, &i->nsparse, i->sparse);
     printf("REQUIREMENTS virtual=%llu alignment=%llu types=%#x sparseCount=%u addressSpaceLimit=%llu\n",
         (unsigned long long)i->req.size, (unsigned long long)i->req.alignment, i->req.memoryTypeBits, i->nsparse,
         (unsigned long long)props.limits.sparseAddressSpaceSize);
-    pass(); validate_requirements(i);
+    pass();
+    if (large && tiled_control && !tiled_eligible(i)) {
+        vkDestroyImage(device, i->handle, NULL); free(i); return 77;
+    }
+    validate_requirements(i);
     start("plan-residency"); plan(i, large); pass();
+    if (large && tiled_control) conformance_require(!i->ntails, "tiled-only plan unexpectedly contains opaque binds");
     // Conservative preflight includes alignment slack for the two staging buffers and backing buffer.
     if (i->backing > CAP / 2 || i->bytes > (CAP - i->backing) / 2 - MIB) {
         puts("SKIP residency/transfers: planned memory exceeds conservative 128 MiB budget");
@@ -456,7 +507,9 @@ static int run_image(uint32_t width, uint32_t layers, int large, int tiled_contr
                              0, 1, &mb, 0, NULL, 0, NULL);
         submit();
     } else puts("SKIP backing-buffer initialization: disjoint memory types; image initialized by upload");
-    bind_image(i, 0); bind_image(i, 1);
+    bind_image(i, 0);
+    if (large && tiled_control) puts("TILED_ONLY imageOpaqueBindCount=0 throughout this run");
+    else bind_image(i, 1);
     transition(i, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, "layout-undefined-to-dst");
     start("synthetic-initial-data"); synthetic(i, 0); pass();
     transfers(i, 0, 0);
@@ -478,8 +531,9 @@ static int run_image(uint32_t width, uint32_t layers, int large, int tiled_contr
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0); setvbuf(stderr, NULL, _IONBF, 0);
-    if (argc > 2 || (argc == 2 && strcmp(argv[1], "--application-shape") && strcmp(argv[1], "--tiled-control"))) {
-        fprintf(stderr, "usage: %s [--application-shape | --tiled-control]\n"
+    if (argc > 2 || (argc == 2 && strcmp(argv[1], "--application-shape") && strcmp(argv[1], "--tiled-control") &&
+        strcmp(argv[1], "--large-tiled-control"))) {
+        fprintf(stderr, "usage: %s [--application-shape | --tiled-control | --large-tiled-control]\n"
             "Set VK_DRIVER_FILES externally to the installed NVK manifest.\n", argv[0]);
         return 2;
     }
@@ -584,14 +638,16 @@ int main(int argc, char **argv) {
     VkSemaphoreCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &ti};
     VK(vkCreateSemaphore(device, &si, NULL, &timeline)); pass();
     int tiled_control = argc == 2 && !strcmp(argv[1], "--tiled-control");
-    int status = run_image(512, 4, 0, tiled_control);
-    if (!status && argc == 2 && !tiled_control) status = run_image(8192, 68, 1, 0);
+    int large_tiled_control = argc == 2 && !strcmp(argv[1], "--large-tiled-control");
+    int status = large_tiled_control ? run_image(8192, 68, 1, 1) : run_image(512, 4, 0, tiled_control);
+    if (!status && argc == 2 && !tiled_control && !large_tiled_control) status = run_image(8192, 68, 1, 0);
     scenario = "device"; start("teardown");
     vkDestroySemaphore(device, timeline, NULL); vkDestroyFence(device, fence, NULL);
     vkDestroyCommandPool(device, pool, NULL); vkDestroyDevice(device, NULL);
     destroy(instance, messenger, NULL); vkDestroyInstance(instance, NULL); pass();
-    printf("RESULT %s validation_errors=%u warnings=%u peak_allocated=%llu bytes\n", status ? "SKIP" : "PASS",
-           atomic_load(&errors), atomic_load(&warnings), (unsigned long long)peak);
+    printf("RESULT %s validation_errors=%u warnings=%u peak_allocated=%llu bytes queue_operations_completed=%llu\n",
+           status ? "SKIP" : "PASS", atomic_load(&errors), atomic_load(&warnings), (unsigned long long)peak,
+           (unsigned long long)serial);
     return status;
 }
 #endif
