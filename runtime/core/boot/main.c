@@ -44,6 +44,9 @@
 #include "platform/platform.h"
 #include "sha256.h"
 #include "ui/launcher/launcher.h"
+#ifdef __APPLE__
+#include "gfx_wsys.h"
+#endif
 
 #define MAX_MODULES 16
 
@@ -615,24 +618,7 @@ static int run_launcher(int argc, char **argv) {
     plat_reexec();
 }
 
-int main(int argc, char **argv) {
-    // --unpack PACKAGE DEST [PREFIX...]: a packed dump's files written out (sdk/fs/pack_unpack.c), for the setup; first,
-    // as the setup runs it before the game code exists (no address space, launcher or log file needed)
-    if (argc >= 2 && !strcmp(argv[1], "--unpack")) return pack_unpack_main(argc - 2, argv + 2);
-#ifdef __APPLE__
-    if (argc == 2 && !strcmp(argv[1], "--probe-game-module")) {
-        const RtGame *game = rt_game();   // validates the embedded ABI and ID before returning the tables
-        printf("game module %s: %u module(s), ABI %u\n", game->id, (unsigned)game->nmodules, (unsigned)game->abi);
-        return 0;
-    }
-#endif
-    if (want_launcher(argc, argv)) return run_launcher(argc, argv);
-#ifdef __linux__
-    // MKW_ALLOW_PTRACE=1: let a debugger attach (tools/run/stacks.py) under yama ptrace_scope 1, without root.
-    const char *pt = getenv("MKW_ALLOW_PTRACE");
-    if (pt && !strcmp(pt, "1")) prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
-#endif
-    mem_init();   // first: claim the guest address space before anything else can land there; reads mkw.ini
+static int run_runtime(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     plat_crash_hook(crash_handler);
@@ -720,4 +706,29 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--prewarm")) return vk_pipeline_prewarm_main();
     if (!strcmp(mode, "--boot")) { cfg.boot = 1; rt_boot(); return 0; }
     return usage(argv[0]);
+}
+
+int main(int argc, char **argv) {
+    // --unpack PACKAGE DEST [PREFIX...]: a packed dump's files written out (sdk/fs/pack_unpack.c), for the setup; first,
+    // as the setup runs it before the game code exists (no address space, launcher or log file needed)
+    if (argc >= 2 && !strcmp(argv[1], "--unpack")) return pack_unpack_main(argc - 2, argv + 2);
+#ifdef __APPLE__
+    if (argc == 2 && !strcmp(argv[1], "--probe-game-module")) {
+        const RtGame *game = rt_game();   // validates the embedded ABI and ID before returning the tables
+        printf("game module %s: %u module(s), ABI %u\n", game->id, (unsigned)game->nmodules, (unsigned)game->abi);
+        return 0;
+    }
+#endif
+    if (want_launcher(argc, argv)) return run_launcher(argc, argv);
+#ifdef __linux__
+    // MKW_ALLOW_PTRACE=1: let a debugger attach (tools/run/stacks.py) under yama ptrace_scope 1, without root.
+    const char *pt = getenv("MKW_ALLOW_PTRACE");
+    if (pt && !strcmp(pt, "1")) prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+#endif
+    mem_init();   // first: claim the guest address space before anything else can land there; reads mkw.ini
+#ifdef __APPLE__
+    return wsys_run_runtime(run_runtime, argc, argv);
+#else
+    return run_runtime(argc, argv);
+#endif
 }

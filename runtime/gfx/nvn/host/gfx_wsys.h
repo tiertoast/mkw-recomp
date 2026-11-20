@@ -4,6 +4,10 @@
 #include "vk.h"
 
 // ---- what the back end provides
+#ifdef __APPLE__
+int wsys_run_runtime(int (*run)(int, char **), int argc, char **argv);   // Cocoa on main, runtime on a worker
+void wsys_show_boot_error(const char *message);   // fatal boot dialog before the first video request
+#endif
 int wsys_open(void);                       // makes the window (and its thread); 0 on failure. Once.
 VkSurfaceKHR wsys_surface(VkInstance inst);   // a new Vulkan surface of the window; VK_NULL_HANDLE on failure
 void wsys_client_size(int *w, int *h);     // the drawable area in pixels
