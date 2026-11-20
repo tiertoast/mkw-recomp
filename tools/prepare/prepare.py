@@ -31,9 +31,11 @@ gone: moved or renamed, #188; a copy's game folder stands in for it, #501), noga
 (a tool's English message) and io (the system's); logs/setup.log gets the English message whole.
 
 Usage: python prepare.py --source DIR|FILE.nup --game DIR [--runtime DIR] [--romfs copy|link] [--jobs N]
-                         [--target linux|windows] [--next --port VER]
+                         [--target linux|windows|macos-x86_64] [--until STEP] [--next --port VER]
 Without --source (the launcher after an update, tools/prepare/update.py): the copy and the RomFS mode of the last
 setup in --game, from its setup-state.json; only the steps whose key changed run again.
+--until STEP stops after that step, including it; later steps and their background jobs do not start.
+The completed step keys remain in setup-state.json for the next run.
 --next (an update while the player keeps playing): the outputs the game reads go to <game>/setup-next/, warm's caches
 too, and cleanup waits; the next run without --next of that --port version moves them into place first (nextsetup.py).
 """
@@ -264,6 +266,7 @@ def main() -> None:
     ap.add_argument("--game", type=Path, required=True, help="the game installation folder")
     ap.add_argument("--runtime", type=Path, help="the folder of mkw / mkw.exe (default: --game)")
     ap.add_argument("--romfs", choices=("copy", "link"), help="(default: the last setup's, else copy)")
+    ap.add_argument("--until", choices=STEPS, default=STEPS[-1], help="stop after this step (inclusive; default: cleanup)")
     ap.add_argument("--jobs", type=int, default=0, help="parallel jobs (default: from cores and memory)")
     ap.add_argument("--cc", help="the C compiler command (default: the package's zig cc, else clang)")
     ap.add_argument("--glslc", help="(default: the package's, else glslc on PATH)")
@@ -278,6 +281,7 @@ def main() -> None:
         "--port", default="", help="the port version this setup is for (the start screen's): kept in the state"
     )
     args = ap.parse_args()
+    steps = STEPS[:STEPS.index(args.until) + 1]
     own_children()
     if ca := update.ca_file():  # spec.py downloads NVIDIA's redistributables with this Python (issue #102, NixOS)
         os.environ["SSL_CERT_FILE"] = ca
@@ -288,14 +292,16 @@ def main() -> None:
     lock = hold_lock(game)  # noqa: F841 (held until exit)
     if args.next:  # the player may be racing meanwhile: the game's threads go first; the tools inherit it
         nextsetup.lower_priority()
-    else:  # the update an earlier --next run set up beside the played version, now that this one runs
+    elif "cleanup" in steps:  # the update an earlier --next run set up beside the played version, now that this one runs
         nextsetup.promote(game, args.port)
     # the played version's outputs promote set aside, deleted beside this run's steps (joined at its end)
-    removing = Beside("remove-old", lambda _: nextsetup.remove_old(game)) if not args.next else None
+    removing = Beside("remove-old", lambda _: nextsetup.remove_old(game)) if not args.next and "cleanup" in steps else None
     state = load_state(game)
     dest = game  # where the outputs the game reads, and the state, are written
     if args.next:  # beside the played version's, the state with them (nextsetup.py)
         state, dest = nextsetup.load(game, state), nextsetup.next_dir(game)
+        state.pop("ready", None)  # a partial or failed update must never be promoted
+        dest.mkdir(parents=True, exist_ok=True)
     if not args.source:  # the last setup's; before 0.1.5 the state kept them only in its keys
         done_exefs = Path(state["done"]["exefs"]) if "exefs" in state["done"] else None
         last = state.get("source") or (
@@ -403,14 +409,14 @@ def main() -> None:
         # The room the steps to come take: the RomFS copy less what a cut one left, and the game's build the first
         # time (an update writes over its files instead of beside them)
         need = 0
-        if "romfs" in STEPS and args.romfs == "copy" and state["done"].get("romfs") != keys["romfs"]:
+        if "romfs" in steps and args.romfs == "copy" and state["done"].get("romfs") != keys["romfs"]:
             need += max(romfs_bytes(romfs_src) - tree_bytes(romfs), 0)
-        if "compile" in STEPS and "compile" not in state["done"]:
+        if "compile" in steps and "compile" not in state["done"]:
             need += BUILD_BYTES
         check_space(game, need)
         # setup-next/spirv's links (17 s on the Windows PC) and the shaders step go beside generate and compile
         # (beside.py): the shaders start with generate, translate.py waits for its end and for the links
-        seeding = Beside("seed", lambda _: nextsetup.seed(game)) if args.next else None
+        seeding = Beside("seed", lambda _: nextsetup.seed(game)) if args.next and "shaders" in steps else None
         code_ready, beside, tidying = threading.Event(), None, None
 
         def shaders_job(b: Beside) -> None:
@@ -424,8 +430,10 @@ def main() -> None:
             shaders(game / "exefs", src_romfs, game, work, glslc, lambda: args.jobs or shader_jobs(share), cc, dest,
                     before_translate, b.progress, spec)  # fmt: skip
 
-        for step in STEPS[1:]:
-            if step == "generate" and state["done"].get("shaders") != keys["shaders"]:
+        # Check has no cached key: persist source/mode even when it is the requested endpoint.
+        save_state(dest, state)
+        for step in steps[1:]:
+            if step == "generate" and "shaders" in steps and state["done"].get("shaders") != keys["shaders"]:
                 beside = Beside("shaders", shaders_job)
             # generate done or skipped: translate.py may take the cores, beside compile when an earlier setup left its
             # objects (an update, a few chunks); a first setup's 360 compiles and translate.py would both size their
@@ -439,7 +447,7 @@ def main() -> None:
             # what cleanup removes, here beside translate.py once compile is done: the swap's cleanup spent 12-17 s
             # in it at the player's first start on the Windows PC, and beside warm it slowed that by 11 s (18/11/2026);
             # generated/ comes back if a compile needs it (regenerate_if_cleaned)
-            if step == "shaders" and args.next:
+            if step == "shaders" and args.next and "cleanup" in steps:
                 tidying = Beside("clear-work", lambda _: clear_work(work))
             # cleanup after the swap, by the new version's own run; warm here, into setup-next/: the Windows PC's
             # swap run spent 106 s in it at the player's first start (18/11/2026)
@@ -514,7 +522,7 @@ def main() -> None:
             if b:
                 b.join()
         print(f"time: setup {time.monotonic() - t_all:.1f} s", file=sys.stderr)
-        if args.next:  # finished: the next start of the new version moves it into place (nextsetup.promote)
+        if args.next and "cleanup" in steps:  # finished: the next start of the new version moves it into place (nextsetup.promote)
             state["port"], state["ready"] = args.port, True
             save_state(dest, state)
         emit("done")
