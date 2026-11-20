@@ -17,6 +17,8 @@ VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse
 VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --large-tiled-control
 # Resource-size control: 32 layers, 5 tiled mips, within the declared resource limit:
 VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --resource-size-control
+# 32-bit layer-offset discriminator (G5-L), with NVK's VA log:
+NVK_DEBUG=vm VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/nvk_icd.json build/vk-sparse/vk-sparse-probe --wrap-discriminator
 ```
 
 Or compile directly with Apple Clang:
@@ -69,6 +71,20 @@ as well. Thus a formerly accepted 68-layer case can now SKIP on a device declari
 The allocation preflight separately logs planned backing and both staging buffers against the 128 MiB cap;
 per-heap and reported-free-budget checks remain enforced before every allocation. Resource size, virtual
 address reservation and physically allocated resident bytes are reported separately.
+
+`--wrap-discriminator` tests one hypothesis for the 68-layer device loss. Mesa NVK 26.3.0-rc3 computes the layer
+address of copy-engine copies as `(layer) * array_stride` in 32-bit arithmetic (`nvk_cmd_copy.c`), while sparse
+binds use 64-bit offsets. With 8192x8192, 68 layers and 5 mips, the layer stride is the requirements' size over the
+layers. This is checked against the levels' whole tiles, and the run skips before GPU work if they differ. The
+probe takes the first layer whose offset reaches 2^32 and the layer just below it as the control. It predicts where
+a wrapped copy would land, then binds the control tile, the wrap tile and every tile of the level that holds the
+predicted address. It copies a distinct 32x32 marker into each of the two layers and finds the markers by copying
+all backing memory through a buffer bound to it, with no image addressing. If the control marker is not in its own
+tile, the run stops before the wrap copy. `VERDICT WRAPPED_LAYER_OFFSET`, `NO_WRAP`, `NOT_FOUND` or `UNEXPECTED`
+reports where the wrap marker went; a device loss means it reached memory outside every bound tile. This is the
+only mode that intentionally exceeds `maxResourceSize` (`INTENTIONAL_OVER_LIMIT`); the sparse address-space limit
+still applies. With `NVK_DEBUG=vm`, NVK logs the image's base VA, and the `PREDICT` lines give the wrapped and
+unwrapped addresses relative to it. Backing is about 4 MiB for this shape (one level), and its readback the same.
 
 Allocations are capped at 128 MiB total, 10% of each heap, and a quarter of the currently reported free budget
 when `VK_EXT_memory_budget` is available. The large plan is skipped if its estimated backing/staging exceeds the

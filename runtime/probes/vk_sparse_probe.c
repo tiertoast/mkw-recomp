@@ -565,11 +565,313 @@ static int run_image(uint32_t width, uint32_t layers, int large, int tiled_contr
     free(i); memory_log(); pass(); return 0;
 }
 
+// --wrap-discriminator (G5-L audit): tests one hypothesis for the G5-J device loss. Mesa NVK 26.3.0-rc3 computes
+// each copy-engine layer address as (z + baseArrayLayer) * array_stride with every operand 32-bit
+// (src/nouveau/vulkan/nvk_cmd_copy.c: `uint32_t array_stride` in struct nouveau_copy_buffer, nouveau_copy_rect),
+// while its sparse binds use 64-bit offsets (nil level_layer_offset_B). If that is what runs, a copy into the first
+// layer whose offset reaches 2^32 writes at (layer * stride) mod 2^32 inside the image, not into that layer's tile.
+// G5-J's fault 0x325140000 = 0x320000000 + (49 * 0x5540000 mod 2^32) fits this, but its base VA was never logged.
+// The probe binds the control tile (last layer below 4 GiB), the wrap tile (first layer at/after 4 GiB) and every
+// tile of the level holding the predicted wrapped address, copies a distinct 32x32 marker into each of the two
+// layers, and finds the markers by copying the backing memory through a buffer: no image addressing is involved in
+// the oracle. If the prediction holds, nothing is written to an unbound tile, so the run separates the wrap from a
+// fault on unbound pages (tested elsewhere). The image intentionally exceeds maxResourceSize, which NVK reports as
+// UINT32_MAX with a TODO (nvk_image.c); G5-J created the same shape.
+#define WRAP_PATCH 32              // texels a side: 8x8 BC7 blocks, inside one tile
+#define WRAP_BLOCKS 64
+#define WRAP_MIPS 5
+typedef struct { uint32_t layer, mip, tx, ty; } WrapSlot;   // what backing slot n (n * alignment) is bound to
+static WrapSlot wrap_slots[MAX_BINDS];
+typedef struct { uint32_t found, slot_first, slots; VkDeviceSize first; } WrapFound;
+
+static void wrap_tile(Image *i, uint32_t layer, uint32_t mip, uint32_t tx, uint32_t ty, VkExtent3D g) {
+    require(i->ntiles < MAX_BINDS, "too many tile binds");
+    uint32_t w = dim(i->width, mip);
+    wrap_slots[i->ntiles] = (WrapSlot){layer, mip, tx, ty};
+    i->tiles[i->ntiles++] = (VkSparseImageMemoryBind){.subresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, layer},
+        .offset = {(int32_t)(tx * g.width), (int32_t)(ty * g.height), 0},
+        .extent = {min32(w - tx * g.width, g.width), min32(w - ty * g.height, g.height), 1}, .memoryOffset = i->backing};
+    i->backing += i->req.alignment;
+}
+
+// 16 bytes, BC7 mode 6 (0x40), tagged "G5L", the region (0 control, 1 wrap), the block and the destination layer.
+static void wrap_marker(uint8_t *p, uint32_t region, uint32_t layer, uint32_t block) {
+    p[0] = 0x40, p[1] = 'G', p[2] = '5', p[3] = 'L', p[4] = (uint8_t)region, p[5] = (uint8_t)block;
+    p[6] = (uint8_t)layer, p[7] = (uint8_t)(layer >> 8);
+    for (unsigned b = 8; b < 16; b++) p[b] = (uint8_t)(0xa5 ^ (region * 16 + b) ^ block);
+}
+
+static int wrap_is_marker(const uint8_t *p) { return p[0] == 0x40 && p[1] == 'G' && p[2] == '5' && p[3] == 'L'; }
+
+static WrapFound wrap_locate(const Image *i, uint32_t region) {
+    WrapFound f = {.slot_first = UINT32_MAX};
+    uint32_t last = UINT32_MAX;
+    for (VkDeviceSize o = 0; o + 16 <= i->backing; o += 16) {
+        const uint8_t *p = i->readback.map + o;
+        if (!wrap_is_marker(p) || p[4] != region) continue;
+        uint32_t s = (uint32_t)(o / i->req.alignment);
+        if (!f.found) f.first = o, f.slot_first = s;
+        if (s != last) f.slots++, last = s;
+        f.found++;
+    }
+    return f;
+}
+
+static uint64_t wrap_stray(const Image *i) {   // nonzero 16-byte blocks that are not markers
+    uint64_t n = 0;
+    for (VkDeviceSize o = 0; o + 16 <= i->backing; o += 16) {
+        const uint8_t *p = i->readback.map + o;
+        if (wrap_is_marker(p)) continue;
+        for (unsigned b = 0; b < 16; b++) if (p[b]) { n++; break; }
+    }
+    return n;
+}
+
+static void wrap_report(const Image *i, const char *what, WrapFound f) {
+    if (!f.found) {
+        printf("LOCATE %s markers=0 of %u: in no bound tile's memory\n", what, WRAP_BLOCKS);
+        return;
+    }
+    const WrapSlot *s = &wrap_slots[f.slot_first];
+    printf("LOCATE %s markers=%u of %u in %u slot(s); first at backing+%#llx = slot %u (layer %u mip %u tile %u,%u) +%#llx\n",
+        what, f.found, WRAP_BLOCKS, f.slots, (unsigned long long)f.first, f.slot_first, s->layer, s->mip, s->tx, s->ty,
+        (unsigned long long)(f.first % i->req.alignment));
+}
+
+// The whole backing memory to the host through the buffer bound to it, after every earlier queue operation.
+static void wrap_readback(Image *i, const char *name) {
+    start(name); begin();
+    VkMemoryBarrier pre = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &pre, 0, NULL, 0, NULL);
+    VkBufferCopy c = {0, 0, i->backing};
+    vkCmdCopyBuffer(cmd, i->backing_buffer, i->readback.handle, 1, &c);
+    VkMemoryBarrier post = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &post, 0, NULL, 0, NULL);
+    submit();
+    VkMappedMemoryRange r = {.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+        .memory = i->readback.allocation.handle, .size = VK_WHOLE_SIZE};
+    VK(vkInvalidateMappedMemoryRanges(device, 1, &r));
+}
+
+static void wrap_upload(Image *i, uint32_t region, const char *name) {
+    start(name); begin();
+    vkCmdCopyBufferToImage(cmd, i->upload.handle, i->handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &i->regions[region]);
+    submit();
+}
+
+static int wrap_skip(Image *i, const char *why) {
+    printf("SKIP [%s/%s] %s; no allocation or queue work\n", scenario, checkpoint, why);
+    if (i->handle) vkDestroyImage(device, i->handle, NULL);
+    free(i); return 77;
+}
+
+static int run_wrap_discriminator(void) {
+    scenario = "8192x8192x68-wrap-discriminator";
+    Image *i = calloc(1, sizeof *i);
+    require(i != NULL, "host allocation");
+    i->width = 8192; i->layers = 68; i->mips = WRAP_MIPS;   // G5-J's shape: every mip before the mip tail
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .flags = VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT | VK_IMAGE_CREATE_SPARSE_ALIASED_BIT,
+        .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_BC7_UNORM_BLOCK, .extent = {i->width, i->width, 1},
+        .mipLevels = i->mips, .arrayLayers = i->layers, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    start("format-limits");
+    VkImageFormatProperties fp;
+    VkResult r = vkGetPhysicalDeviceImageFormatProperties(gpu, ci.format, ci.imageType, ci.tiling, ci.usage, ci.flags, &fp);
+    printf("API vkGetPhysicalDeviceImageFormatProperties -> %d\n", r);
+    if (r == VK_ERROR_FORMAT_NOT_SUPPORTED || (r == VK_SUCCESS && (i->width > fp.maxExtent.width ||
+        i->width > fp.maxExtent.height || i->layers > fp.maxArrayLayers || i->mips > fp.maxMipLevels)))
+        return wrap_skip(i, "requested sparse BC7 shape unsupported");
+    result(r, "vkGetPhysicalDeviceImageFormatProperties");
+    printf("IMAGE format=%d flags=%#x usage=%#x mips=%u maxResourceSize=%llu\n", ci.format, ci.flags, ci.usage,
+           i->mips, (unsigned long long)fp.maxResourceSize);
+    pass(); start("resource-size-preflight");
+    VkDeviceSize theoretical = bc7_image_bytes(i);
+    printf("RESOURCE_SIZE maxResourceSize=%llu theoreticalBC7=%llu sparseAddressSpace=%llu bytes\n",
+        (unsigned long long)fp.maxResourceSize, (unsigned long long)theoretical,
+        (unsigned long long)props.limits.sparseAddressSpaceSize);
+    if (theoretical > props.limits.sparseAddressSpaceSize) return wrap_skip(i, "theoretical size exceeds the sparse address space");
+    if (theoretical > fp.maxResourceSize)
+        printf("INTENTIONAL_OVER_LIMIT theoretical size exceeds maxResourceSize by %llu bytes: this mode tests whether "
+               "that limit stands for a 32-bit copy offset; GPU work past the limit is two %u-byte copies\n",
+               (unsigned long long)(theoretical - fp.maxResourceSize), WRAP_BLOCKS * 16);
+    const char *dbg = getenv("NVK_DEBUG");
+    printf("NVK_DEBUG=%s%s\n", dbg ? dbg : "(unset)",
+           dbg && strstr(dbg, "vm") ? "" : ": set NVK_DEBUG=vm to log the image's base VA (\"alloc va [..) sparse\")");
+    pass();
+    start("create-image");
+    VK(vkCreateImage(device, &ci, NULL, &i->handle)); pass();
+    start("memory-requirements");
+    vkGetImageMemoryRequirements(device, i->handle, &i->req);
+    vkGetImageSparseMemoryRequirements(device, i->handle, &i->nsparse, NULL);
+    conformance_require(i->nsparse && i->nsparse <= 8 && i->req.alignment && i->req.memoryTypeBits, "invalid memory requirements");
+    vkGetImageSparseMemoryRequirements(device, i->handle, &i->nsparse, i->sparse);
+    printf("REQUIREMENTS virtual=%llu alignment=%llu types=%#x sparseCount=%u\n", (unsigned long long)i->req.size,
+        (unsigned long long)i->req.alignment, i->req.memoryTypeBits, i->nsparse);
+    if (i->req.size > props.limits.sparseAddressSpaceSize) return wrap_skip(i, "requirements exceed the sparse address space");
+    pass();
+    if (!tiled_eligible(i)) { vkDestroyImage(device, i->handle, NULL); free(i); return 77; }
+    validate_requirements(i);
+
+    // The prediction needs the layer layout: a layer is its levels in whole tiles, back to back, and the layer stride
+    // is the requirements' size over the layers (NIL's layout for these mips, the one G5-J's size matched). Checked,
+    // not assumed: a mismatch skips before any GPU work.
+    start("layout-assumption");
+    const VkSparseImageMemoryRequirements *color = NULL;
+    for (uint32_t n = 0; n < i->nsparse; n++)
+        if (i->sparse[n].formatProperties.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT) color = &i->sparse[n];
+    require(color != NULL, "no color sparse requirements");
+    VkExtent3D g = color->formatProperties.imageGranularity;
+    require(g.width && g.height && g.depth == 1, "unsupported granularity");
+    VkDeviceSize tile = i->req.alignment, stride = i->req.size / i->layers, level[WRAP_MIPS], sum = 0;
+    uint32_t tiles_x[WRAP_MIPS], tiles_y[WRAP_MIPS];
+    for (uint32_t mip = 0; mip < i->mips; mip++) {
+        uint32_t w = dim(i->width, mip);
+        tiles_x[mip] = (w + g.width - 1) / g.width, tiles_y[mip] = (w + g.height - 1) / g.height;
+        level[mip] = sum, sum += (VkDeviceSize)tiles_x[mip] * tiles_y[mip] * tile;
+    }
+    printf("LAYOUT stride=%#llx levels=%#llx,%#llx,%#llx,%#llx,%#llx tile=%llu granularity=%ux%u layerSum=%#llx\n",
+        (unsigned long long)stride, (unsigned long long)level[0], (unsigned long long)level[1],
+        (unsigned long long)level[2], (unsigned long long)level[3], (unsigned long long)level[4],
+        (unsigned long long)tile, g.width, g.height, (unsigned long long)sum);
+    if (i->req.size % i->layers || sum != stride)
+        return wrap_skip(i, "layer stride is not the levels' whole tiles back to back: the wrapped address cannot be predicted");
+    uint32_t wrap = UINT32_MAX;
+    for (uint32_t l = 0; l < i->layers && wrap == UINT32_MAX; l++) if ((uint64_t)l * stride >= (1ull << 32)) wrap = l;
+    if (wrap == UINT32_MAX) return wrap_skip(i, "no layer starts at or past 4 GiB");
+    uint32_t control = wrap - 1;
+    VkDeviceSize predicted = (uint32_t)((uint64_t)wrap * stride);   // the offset 32-bit arithmetic gives
+    uint32_t target = (uint32_t)(predicted / stride), tmip = 0;
+    VkDeviceSize rel = predicted % stride;
+    while (tmip + 1 < i->mips && rel >= level[tmip + 1]) tmip++;
+    VkDeviceSize k = (rel - level[tmip]) / tile;
+    printf("PREDICT wrapLayer=%u offset=%#llx controlLayer=%u offset=%#llx; 32-bit offset of the wrap layer %#llx = "
+           "layer %u mip %u tile %llu,%llu +%#llx\n", wrap, (unsigned long long)((uint64_t)wrap * stride), control,
+           (unsigned long long)((uint64_t)control * stride), (unsigned long long)predicted, target, tmip,
+           (unsigned long long)(k % tiles_x[tmip]), (unsigned long long)(k / tiles_x[tmip]),
+           (unsigned long long)((rel - level[tmip]) % tile));
+    printf("PREDICT with NVK_DEBUG=vm base B of this image: wrapped write at B+%#llx, unwrapped at B+%#llx\n",
+           (unsigned long long)predicted, (unsigned long long)((uint64_t)wrap * stride));
+    if (target == control || target == wrap) return wrap_skip(i, "the predicted target is the control or wrap layer");
+    pass();
+
+    start("plan-residency");
+    // The whole predicted level of the target layer, whatever the order of tiles inside it: the wrapped write lands in
+    // bound memory. The whole layer would be 1364 tiles (85 MiB) for G5-J's shape, past the cap with its readback.
+    for (uint32_t ty = 0; ty < tiles_y[tmip]; ty++)
+        for (uint32_t tx = 0; tx < tiles_x[tmip]; tx++) wrap_tile(i, target, tmip, tx, ty, g);
+    uint32_t control_slot = i->ntiles, wrap_slot = i->ntiles + 1;
+    wrap_tile(i, control, 0, 0, 0, g);
+    wrap_tile(i, wrap, 0, 0, 0, g);
+    uint32_t pw = min32(WRAP_PATCH, g.width), ph = min32(WRAP_PATCH, g.height);
+    uint32_t blocks = (pw / 4) * (ph / 4);
+    require(blocks == WRAP_BLOCKS, "marker patch is not 8x8 BC7 blocks");
+    for (uint32_t n = 0; n < 2; n++)
+        i->regions[n] = (VkBufferImageCopy){.bufferOffset = (VkDeviceSize)n * WRAP_BLOCKS * 16,
+            .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, n ? wrap : control, 1}, .imageExtent = {pw, ph, 1}};
+    i->nregions = 2, i->bytes = 2 * WRAP_BLOCKS * 16;
+    printf("PLAN tileBinds=%u (layer %u mip %u whole, control slot %u, wrap slot %u) opaqueBinds=0 backing=%llu "
+           "transfer=%llu readback=%llu bytes\n", i->ntiles, target, tmip, control_slot, wrap_slot, (unsigned long long)i->backing,
+           (unsigned long long)i->bytes, (unsigned long long)i->backing);
+    if (2 * i->backing + i->bytes > CAP - 2 * MIB) return wrap_skip(i, "planned memory exceeds the 128 MiB cap");
+    pass();
+
+    start("allocate-backing");
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = i->backing,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    VK(vkCreateBuffer(device, &bi, NULL, &i->backing_buffer));
+    VkMemoryRequirements br;
+    vkGetBufferMemoryRequirements(device, i->backing_buffer, &br);
+    uint32_t common = br.memoryTypeBits & i->req.memoryTypeBits;
+    printf("BACKING bufferTypes=%#x imageTypes=%#x common=%#x bufferRequirement=%llu\n", br.memoryTypeBits,
+        i->req.memoryTypeBits, common, (unsigned long long)br.size);
+    if (!common) {
+        vkDestroyBuffer(device, i->backing_buffer, NULL);
+        return wrap_skip(i, "no memory type serves both the image and a buffer: the oracle reads the backing through one");
+    }
+    i->allocation = allocate(br.size, memory_type(common, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+    VK(vkBindBufferMemory(device, i->backing_buffer, i->allocation.handle, 0));
+    for (uint32_t n = 0; n < i->ntiles; n++) i->tiles[n].memory = i->allocation.handle;
+    i->upload = buffer(i->bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    i->readback = buffer(i->backing, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    for (uint32_t n = 0; n < 2; n++)
+        for (uint32_t b = 0; b < WRAP_BLOCKS; b++)
+            wrap_marker(i->upload.map + (n * WRAP_BLOCKS + b) * 16, n, n ? wrap : control, b);
+    VkMappedMemoryRange up = {.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+        .memory = i->upload.allocation.handle, .size = VK_WHOLE_SIZE};
+    VK(vkFlushMappedMemoryRanges(device, 1, &up));
+    memory_log(); pass();
+
+    start("initialize-backing-buffer");
+    begin(); vkCmdFillBuffer(cmd, i->backing_buffer, 0, VK_WHOLE_SIZE, 0);
+    VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    submit();
+    bind_image(i, 0);
+    puts("TILED_ONLY imageOpaqueBindCount=0 throughout this run");
+    transition(i, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, "layout-undefined-to-dst");
+    wrap_readback(i, "readback-baseline");
+    printf("BASELINE nonzero 16-byte blocks=%llu (expected 0 after the fill)\n", (unsigned long long)wrap_stray(i));
+
+    // Control: the last layer whose offset fits 32 bits. Its marker must land in its own tile, or the oracle (layout
+    // or slot mapping) is wrong and the wrap copy could not be classified: stop before it.
+    wrap_upload(i, 0, "upload-control-layer");
+    wrap_readback(i, "readback-after-control");
+    start("locate-control");
+    WrapFound c = wrap_locate(i, 0);
+    wrap_report(i, "control", c);
+    if (c.found != WRAP_BLOCKS || c.slots != 1 || c.slot_first != control_slot) {
+        failure_kind = "ORACLE";
+        fail("control marker not exactly in the control layer's tile: the wrap copy could not be classified");
+    }
+    pass();
+
+    printf("PREDICT next: 32-bit layer offset -> wrap markers in layer %u's memory (mip %u), no fault; no wrap -> in "
+           "slot %u (layer %u); device loss -> the copy reached memory outside every bound tile\n", target, tmip,
+           wrap_slot, wrap);
+    wrap_upload(i, 1, "upload-wrap-layer");
+    wrap_readback(i, "readback-after-wrap");
+    start("verdict");
+    WrapFound w = wrap_locate(i, 1);
+    c = wrap_locate(i, 0);
+    wrap_report(i, "control", c);
+    wrap_report(i, "wrap", w);
+    printf("STRAY nonzero 16-byte blocks outside markers=%llu\n", (unsigned long long)wrap_stray(i));
+    const WrapSlot *ws = w.found ? &wrap_slots[w.slot_first] : NULL;
+    if (w.found == WRAP_BLOCKS && w.slots == 1 && ws->layer == target)
+        printf("VERDICT WRAPPED_LAYER_OFFSET copy to layer %u wrote layer %u mip %u tile %u,%u (predicted mip %u tile "
+               "%llu,%llu: %s), the 32-bit offset %#llx\n", wrap, ws->layer, ws->mip, ws->tx, ws->ty, tmip,
+               (unsigned long long)(k % tiles_x[tmip]), (unsigned long long)(k / tiles_x[tmip]),
+               ws->mip == tmip && ws->tx == k % tiles_x[tmip] && ws->ty == k / tiles_x[tmip] ? "match" : "differs",
+               (unsigned long long)predicted);
+    else if (w.found == WRAP_BLOCKS && w.slots == 1 && w.slot_first == wrap_slot)
+        printf("VERDICT NO_WRAP copy to layer %u landed in its own tile: the 32-bit offset hypothesis is refuted here\n", wrap);
+    else if (!w.found)
+        printf("VERDICT NOT_FOUND copy to layer %u reached no bound tile and did not fault\n", wrap);
+    else
+        printf("VERDICT UNEXPECTED %u wrap markers in %u slot(s)\n", w.found, w.slots);
+    if (c.found != WRAP_BLOCKS || c.slot_first != control_slot) puts("NOTE the control marker changed after the wrap copy");
+    pass();
+
+    transition(i, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, "layout-dst-to-sampled");
+    start("release-completed-resources");
+    vkDestroyImage(device, i->handle, NULL);
+    vkDestroyBuffer(device, i->backing_buffer, NULL);
+    release_allocation(i->allocation); release_buffer(i->upload); release_buffer(i->readback);
+    free(i); memory_log(); pass(); return 0;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0); setvbuf(stderr, NULL, _IONBF, 0);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--application-shape") && strcmp(argv[1], "--tiled-control") &&
-        strcmp(argv[1], "--large-tiled-control") && strcmp(argv[1], "--resource-size-control"))) {
-        fprintf(stderr, "usage: %s [--application-shape | --tiled-control | --large-tiled-control | --resource-size-control]\n"
+        strcmp(argv[1], "--large-tiled-control") && strcmp(argv[1], "--resource-size-control") &&
+        strcmp(argv[1], "--wrap-discriminator"))) {
+        fprintf(stderr, "usage: %s [--application-shape | --tiled-control | --large-tiled-control | --resource-size-control |"
+            " --wrap-discriminator]\n"
             "Set VK_DRIVER_FILES externally to the installed NVK manifest.\n", argv[0]);
         return 2;
     }
@@ -676,9 +978,10 @@ int main(int argc, char **argv) {
     int tiled_control = argc == 2 && !strcmp(argv[1], "--tiled-control");
     int large_tiled_control = argc == 2 && !strcmp(argv[1], "--large-tiled-control");
     int resource_size_control = argc == 2 && !strcmp(argv[1], "--resource-size-control");
-    int status = resource_size_control ? run_image(8192, 32, 1, 1) :
+    int wrap_discriminator = argc == 2 && !strcmp(argv[1], "--wrap-discriminator");
+    int status = wrap_discriminator ? run_wrap_discriminator() : resource_size_control ? run_image(8192, 32, 1, 1) :
         large_tiled_control ? run_image(8192, 68, 1, 1) : run_image(512, 4, 0, tiled_control);
-    if (!status && argc == 2 && !tiled_control && !large_tiled_control && !resource_size_control)
+    if (!status && argc == 2 && !tiled_control && !large_tiled_control && !resource_size_control && !wrap_discriminator)
         status = run_image(8192, 68, 1, 0);
     scenario = "device"; start("teardown");
     vkDestroySemaphore(device, timeline, NULL); vkDestroyFence(device, fence, NULL);
