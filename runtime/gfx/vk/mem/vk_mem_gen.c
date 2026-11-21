@@ -153,11 +153,14 @@ int vk_mem_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) 
     uint32_t g = ++gen_now;
     int tracked = 1, frozen = 1;
     for (uint64_t a = lo & ~((1ull << REG_SHIFT) - 1); a < hi && frozen; a += 1ull << REG_SHIFT) frozen = mem_frozen(a);
-    while (!frozen) {
-        uint64_t n = ww_query(lo, hi - lo);
+    for (uint64_t q = lo; !frozen && q < hi;) {
+        uint64_t n = ww_query(q, hi - q);
         if (n == UINT64_MAX) { tracked = 0; break; }
         for (uint64_t k = 0; k < n; k++) stamp_page(gen_pages[k], g, 1);
         if (n < sizeof gen_pages / sizeof *gen_pages) break;   // a full answer may have left pages for the next call
+        // ...after the last one: a page may be reported again without a new write (Darwin's hot pages), so a query
+        // from the start again need not end.
+        q = gen_pages[n - 1] + (1ull << GEN_PAGE_SHIFT);
     }
     int changed = 0;
     for (uint64_t a = lo; tracked && a < hi && !changed; a += 1ull << GEN_PAGE_SHIFT) {
@@ -195,11 +198,12 @@ uint64_t snap_regions(uint64_t r0, uint64_t r1, uint32_t epoch) {
         uint64_t a = r << SNAP_SHIFT, b = (k + 1) << SNAP_SHIFT;
         int tracked = 1;
         if (!g) g = ++gen_now;
-        for (;;) {
-            uint64_t n = ww_query(a, b - a);
+        for (uint64_t q = a; q < b;) {
+            uint64_t n = ww_query(q, b - q);
             if (n == UINT64_MAX) { tracked = 0; break; }
             for (uint64_t j = 0; j < n; j++) stamp_page(gen_pages[j], g, 1);
             if (n < sizeof gen_pages / sizeof *gen_pages) break;
+            q = gen_pages[n - 1] + (1ull << GEN_PAGE_SHIFT);   // past the last page reported, as vk_mem_changed
         }
         calls++;
         for (uint64_t j = r; j <= k; j++) {
@@ -258,13 +262,16 @@ void vk_mem_snap_stats(uint64_t *checks, uint64_t *calls, uint64_t *untracked) {
 
 // gen_lock held exclusively. 0: the range is not write-watched.
 int query_stamp(uint64_t lo, uint64_t hi, uint32_t g) {
-    for (;;) {
+    while (lo < hi) {
         uint64_t n = ww_query(lo, hi - lo);
         if (n == UINT64_MAX) return 0;
         for (uint64_t k = 0; k < n; k++) stamp_page(gen_pages[k], g, 1);
         if (n < sizeof gen_pages / sizeof *gen_pages) return 1;
-        if (ww_peek) lo = gen_pages[n - 1] + (1ull << GEN_PAGE_SHIFT);   // the pages stay written: go on past them
+        // Past the last page reported: with ww_peek the pages stay written, and Darwin's hot pages are reported again
+        // without a new write, so a query from the start again need not end.
+        lo = gen_pages[n - 1] + (1ull << GEN_PAGE_SHIFT);
     }
+    return 1;
 }
 // gen_lock exclusive: freezes up to FREEZE_PER_SUB candidate regions still idle. The query after the
 // protection collects the writes made before it took effect.

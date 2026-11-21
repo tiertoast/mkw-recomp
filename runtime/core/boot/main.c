@@ -6,6 +6,7 @@
 //     --replay DIR      a frame capture (MKW_CAPTURE, runtime/gfx/cap) replayed through the back end, no game
 //     --probe-loader    load and relocate the modules, check them against the measured 1.2.1 values
 //     --probe-kernel, --probe-audio, --probe-services, --probe-fs    host probes
+//     --probe-writewatch  the platform's write watch on a reservation of its own, and a fault's cost; no game files
 //     --probe-gfx-abi   NVN object layouts against nvn.h's reserved sizes; needs no game files
 //     --probe-nvn, --probe-nvn-tex, --probe-window, --probe-vkmem, --probe-vkexec    graphics probes
 //     --probe-astc      the compute ASTC decoder against astc_decode_ldr; needs no game files
@@ -513,7 +514,7 @@ static int selftest(void) {
 
 static int usage(const char *argv0) {
     fprintf(stderr, "usage: %s [--exefs DIR] [--romfs DIR|FILE.nup|FILE.nx] [--nup FILE] [--profile DIR] [--launcher | --play | --selftest | --probe-loader | "
-                    "--probe-cfg | --probe-kernel | --probe-audio | --probe-services | --probe-fs | --probe-gfx-abi | "
+                    "--probe-cfg | --probe-writewatch | --probe-kernel | --probe-audio | --probe-services | --probe-fs | --probe-gfx-abi | "
                     "--probe-nvn | --probe-nvn-tex | --probe-window | --probe-vkmem | "
                     "--probe-vkexec | --probe-astc | --probe-framegen | --probe-gpu-clocks | --probe-fps | --probe-discord | --probe-dsu | --probe-texpre | --texpre | --prewarm | --boot |--seconds S [--shot PNG]]\n", argv0);
     return 2;
@@ -683,6 +684,7 @@ static int run_runtime(int argc, char **argv) {
     if (!strcmp(mode, "--selftest")) return selftest();
     if (!strcmp(mode, "--probe-loader")) return probe_loader();
     if (!strcmp(mode, "--probe-cfg")) return probe_cfg();
+    if (!strcmp(mode, "--probe-writewatch")) return probe_writewatch();
     if (!strcmp(mode, "--probe-kernel")) return probe_kernel();
     if (!strcmp(mode, "--probe-audio")) return probe_audio();
     if (!strcmp(mode, "--probe-services")) return probe_services();

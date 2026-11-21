@@ -63,6 +63,20 @@ static uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1)
 
 static int reserve_at(uint64_t at, uint64_t size, int watch) { return plat_mem_reserve(at, size, watch); }
 
+// Whether the stack, heap and alias reservations get the write watch. Darwin's (darwin_mem.c) takes a fault at the
+// first write of each page after each report, where Linux and Windows pay nothing: off until measured in a race
+// (MKW_WRITE_WATCH=1, read from the environment: mkw.ini is read after the reservations). Without it the back end
+// hashes texture storage and copies whole pools at every submission instead (G5-L race profile, 20/11/2026: ~80% of
+// the replay thread's busy time).
+static int want_watch(void) {
+#ifdef __APPLE__
+    const char *e = cfg_get("MKW_WRITE_WATCH");
+    return e && atoi(e) != 0;
+#else
+    return 1;
+#endif
+}
+
 // ---- frozen regions
 // A 2 MiB region of the watched reservations that nothing wrote for a while can be made read-only (mem_freeze), so the
 // back end's write-watch queries skip it: no page of a frozen region changes before a thaw. The first write faults and
@@ -114,6 +128,17 @@ static void thaw_range_locked(uint64_t a, uint64_t n, int why) {
     uint64_t r0 = a >> FRZ_SHIFT, r1 = (a + n - 1 < RT_ADDRESS_LIMIT ? a + n - 1 : RT_ADDRESS_LIMIT - 1) >> FRZ_SHIFT;
     for (uint64_t r = r0; r <= r1; r++) thaw_locked(r, why);
 }
+
+// Around one synchronous kernel write into guest memory (a file read, a socket receive): thawed as mem_thaw, and
+// announced to Darwin's write watch, whose protected pages make the kernel's write fail with EFAULT (platform.h
+// plat_mem_will_write). Every such call site pairs them; the other mem_thaw callers write in user mode, which faults.
+void mem_kernel_write(uint64_t a, uint64_t n) {
+    mem_thaw(a, n);
+    if (!plat_mem_will_write(a, n))
+        rt_log("memory: %#llx+%#llx could not be made writable for a kernel write", (unsigned long long)a,
+               (unsigned long long)n);
+}
+void mem_kernel_wrote(uint64_t a, uint64_t n) { plat_mem_wrote(a, n); }
 
 void mem_thaw(uint64_t a, uint64_t n) {
     mem_commit_range(a, n);   // a kernel write does not fault into lazy_fault
@@ -461,11 +486,12 @@ void mem_init(void) {
 
     // Stack and heap block, then the alias region above it, both searched below the module window.
     uint64_t low = 0, alias = 0;
+    int watch = want_watch();
     for (uint64_t at = LOW_SEARCH_FROM; at + LOW_SIZE <= mods_lo && !low; at += GiB)
-        if (reserve_at(at, LOW_SIZE, 1)) low = at;
+        if (reserve_at(at, LOW_SIZE, watch)) low = at;
     if (!low) reexec_or_fail("a 6 GiB stack and heap block below 2^39");
     for (uint64_t at = align_up(low + LOW_SIZE, ALIAS_ALIGN); at + ALIAS_SIZE <= mods_lo && !alias; at += ALIAS_ALIGN)
-        if (reserve_at(at, ALIAS_SIZE, 1)) alias = at;
+        if (reserve_at(at, ALIAS_SIZE, watch)) alias = at;
     if (!alias) reexec_or_fail("a 64 GiB alias region below 2^39");
 
     if (PLAT_CAN_RETRY_FAULT) plat_mem_fault_hook(thaw_fault);   // before the crash handler
