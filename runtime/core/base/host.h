@@ -371,6 +371,7 @@ void rt_boot(void);                                        // boot.c
 // process exit code.
 int probe_cfg(void);                                       // cfg_probe.c
 int probe_writewatch(void);                                // ww_probe.c
+int probe_locks(void);                                     // lock_probe.c
 int probe_loader(void), probe_kernel(void), probe_audio(void), probe_services(void), probe_fs(void);
 int probe_gfx_abi(void);                                   // gfx_abi_probe.c
 int probe_vkdevice(void);                                 // vk_device.c
