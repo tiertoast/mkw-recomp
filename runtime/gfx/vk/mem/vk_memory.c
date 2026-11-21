@@ -449,7 +449,7 @@ void vk_mem_shutdown(void) {
     if (!c) return;
     vk_upload_flush(1);
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    vk_device_wait_idle(c->device);
     vk_queue_unlock();
     vk_texture_shutdown();
     upload_shutdown(c);

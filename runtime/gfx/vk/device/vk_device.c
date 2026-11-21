@@ -210,6 +210,7 @@ static int pick_device(void) {
     VkQueueFamilyProperties *qp = calloc(nq ? nq : 1, sizeof *qp);
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, qp);
     g_vk.gfx_family = find_gfx_family(g_vk.phys, qp, nq);
+    g_vk.gfx_family_queues = g_vk.gfx_family < nq ? qp[g_vk.gfx_family].queueCount : 1;
     g_vk.xfer_family = g_vk.gfx_family;
     for (uint32_t i = 0; i < nq; i++)   // a family that does transfer only (async DMA engine)
         if ((qp[i].queueFlags & VK_QUEUE_TRANSFER_BIT) && !(qp[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))) {
@@ -408,14 +409,28 @@ static int create_device(void) {
                has_fbl && c->fbl.attachmentFeedbackLoopLayout, has_lr && c->lr.dynamicRenderingLocalRead);
     }
 
-    float prio = 1.0f;
+    float prio[2] = {1.0f, 1.0f};
+    // MKW_PRESENT_QUEUE (default 1 on macOS, 0 elsewhere; "ab"): a second queue of the graphics family for the
+    // presents. NVK on macOS presents in software (NullMoth's nvk-metal-wsi.patch, sw_device): Mesa's
+    // wsi_common_queue_present waits on the CPU for the GPU to finish, then copies the image into the drawable, and
+    // did it under the queue lock that the replay thread takes before each submission: 4.9 ms a frame by the median
+    // (p99 9.9), 6.6-12.8 ms in frames over 25 ms (GP race, RTX 3090, 21/11/2026). On its own queue only the present
+    // waits: -0.30 / -0.26 ms a frame in an in-run A/B and its inverted twin. Elsewhere the present does not block
+    // like this and the second queue (a hardware channel) was not measured, so it stays off there.
+    const char *pq = cfg_get("MKW_PRESENT_QUEUE");
+#ifdef __APPLE__
+    int pq_want = !(pq && !strcmp(pq, "0"));
+#else
+    int pq_want = pq && *pq && strcmp(pq, "0");
+#endif
+    int two = g_vk.gfx_family_queues >= 2 && pq_want;
     VkDeviceQueueCreateInfo qi[2] = {
-        {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.gfx_family, .queueCount = 1,
-         .pQueuePriorities = &prio}};
+        {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.gfx_family,
+         .queueCount = two ? 2u : 1u, .pQueuePriorities = prio}};
     uint32_t nqi = 1;
     if (g_vk.xfer_family != g_vk.gfx_family) {
         qi[1] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                                          .queueFamilyIndex = g_vk.xfer_family, .queueCount = 1, .pQueuePriorities = &prio};
+                                          .queueFamilyIndex = g_vk.xfer_family, .queueCount = 1, .pQueuePriorities = prio};
         nqi = 2;
     }
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &c->f2, .queueCreateInfoCount = nqi,
@@ -427,6 +442,11 @@ static int create_device(void) {
     vk_lat_device(g_vk.device, has_pw);
     vk_pstate_init(g_vk.phys);
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
+    g_vk.present_queue = g_vk.gfx_queue;
+    if (two) vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 1, &g_vk.present_queue);
+    rt_log("vk: presents %s (MKW_PRESENT_QUEUE=%s, %u queues in the graphics family)",
+           two ? "on a queue of their own" : "on the graphics queue under the queue lock", pq ? pq : "unset",
+           g_vk.gfx_family_queues);
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }
 
@@ -529,7 +549,7 @@ static long g_errors_total;     // outlives the device so the probe can print it
 
 static void destroy_all(void) {
     gfx_window_release_vk();
-    if (g_vk.device) vkDeviceWaitIdle(g_vk.device);
+    if (g_vk.device) vk_device_wait_idle(g_vk.device);
     if (g_vk.device) vk_astc_release(), vk_crumbs_release();
     if (g_vk.timeline) vkDestroySemaphore(g_vk.device, g_vk.timeline, NULL);
     vk_headroom_stop();

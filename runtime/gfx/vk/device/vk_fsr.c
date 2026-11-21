@@ -102,7 +102,7 @@ static int ensure_images(VkCtx *c, uint32_t w, uint32_t h) {
     // A swapchain size change: earlier presents may still read the old images. vkDeviceWaitIdle needs every queue
     // externally synchronized, so it holds the queue lock like a submission (totk-pc-recomp 43704c0, MIT).
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    vk_device_wait_idle(c->device);
     vk_queue_unlock();
     free_images(c);
     for (int i = 0; i < 2; i++) {

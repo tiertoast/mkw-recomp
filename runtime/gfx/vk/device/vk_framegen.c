@@ -198,7 +198,7 @@ static int ensure_images(VkCtx *c, int w, int h) {
     // A size change: earlier presents may still read the old images (vkDeviceWaitIdle holds the queue lock, as
     // vk_fsr.c ensure_images)
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    vk_device_wait_idle(c->device);
     vk_queue_unlock();
     free_images(c);
     const VkImageUsageFlags XS = VK_IMAGE_USAGE_TRANSFER_SRC_BIT, XD = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
