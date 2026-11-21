@@ -44,6 +44,22 @@ void vk_queue_lock(void) {
     vk_sync_parts_flush();
 }
 void vk_queue_unlock(void) { plat_rmutex_unlock(&g_ql); }
+static PlatRMutex g_pql;
+void vk_present_queue_lock(void) { plat_rmutex_lock(&g_pql); }
+void vk_present_queue_unlock(void) { plat_rmutex_unlock(&g_pql); }
+VkResult vk_device_wait_idle(VkDevice device) {
+    vk_present_queue_lock();
+    VkResult r = vkDeviceWaitIdle(device);
+    vk_present_queue_unlock();
+    return r;
+}
+int vk_present_own_queue(void) {
+    static int mode = -1;
+    VkCtx *c = vk_ctx();
+    if (!c || c->present_queue == c->gfx_queue) return 0;
+    if (mode < 0) mode = rt_knob("PRESENT_QUEUE", "1");   // the queue exists only where it is wanted (vk_device.c)
+    return RT_KNOB_ON(mode);
+}
 
 // ---- window state shared with the back end
 static VkSurfaceKHR g_surface;
@@ -281,9 +297,14 @@ static uint64_t flip_one_locked(void) {
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = id ? &pid : NULL,
                            .waitSemaphoreCount = 1, .pWaitSemaphores = &g_render_done[idx], .swapchainCount = 1,
                            .pSwapchains = &g_sc, .pImageIndices = &idx};
-    vk_queue_lock();
-    VkResult r = vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
-    vk_queue_unlock();
+    // The blit this present waits for (g_render_done) was submitted under the queue lock before (vk_present_image), so
+    // its signal precedes this wait as a binary semaphore needs. Same family: no ownership transfer.
+    int own = vk_present_own_queue();
+    if (own) vk_present_queue_lock();
+    else vk_queue_lock();
+    VkResult r = vkQueuePresentKHR(own ? vk_ctx()->present_queue : vk_ctx()->gfx_queue, &pi);
+    if (own) vk_present_queue_unlock();
+    else vk_queue_unlock();
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
     return id;
 }
@@ -341,7 +362,7 @@ static int create_swapchain(void) {
                caps.maxImageCount);
 
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    vk_device_wait_idle(c->device);
     VkSwapchainKHR old = g_sc;
     VkSwapchainCreateInfoKHR ci = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_surface, .minImageCount = count,
@@ -840,7 +861,7 @@ void gfx_window_release_vk(void) {
     plat_rmutex_lock(&g_pl);
     if (c && g_started) {
         vk_queue_lock();
-        vkDeviceWaitIdle(c->device);
+        vk_device_wait_idle(c->device);
         vk_queue_unlock();
         g_flip_n = 0;   // their blits are done (device idle); the swapchain goes away unpresented
         menu_vk_release();

@@ -23,9 +23,12 @@ typedef struct VkCtx {
     VkPhysicalDeviceMemoryProperties mem_props;
     uint32_t gfx_family;                    // graphics + compute + presentation on win32
     uint32_t xfer_family;                   // a transfer-only family when the GPU has one, else gfx_family
-    VkQueue gfx_queue;                      // graphics + present
+    VkQueue gfx_queue;                      // graphics, and the presents unless present_queue is another queue
     VkQueue xfer_queue;                     // equals gfx_queue when xfer_shared
     int xfer_shared;                        // 1: no separate queue; serialise with gfx_queue
+    uint32_t gfx_family_queues;             // queues the graphics family offers
+    VkQueue present_queue;                  // a second graphics-family queue for presents (MKW_PRESENT_QUEUE), else
+                                            // gfx_queue; its own lock, vk_present_queue_lock
     VmaAllocator vma;
     VkSemaphore timeline;                   // one timeline semaphore; values are issued by vk_sync.c
     VkDebugUtilsMessengerEXT messenger;
@@ -142,6 +145,13 @@ void vk_fg_release(void);   // before the device goes away
 // rebuild do. Recursive.
 void vk_queue_lock(void);
 void vk_queue_unlock(void);
+// MKW_PRESENT_QUEUE: presents on ctx->present_queue take this lock instead of the queue lock, so a present that blocks
+// (a software present waits for the GPU on the CPU) does not hold up the submissions. Recursive. vk_device_wait_idle
+// takes it too (vkDeviceWaitIdle needs every queue externally synchronized): callers hold the queue lock first.
+void vk_present_queue_lock(void);
+void vk_present_queue_unlock(void);
+VkResult vk_device_wait_idle(VkDevice device);
+int vk_present_own_queue(void);   // this present goes to present_queue (1) or to gfx_queue under the queue lock (0)
 void vk_sync_parts_flush(void);   // queue lock held: the parts waiting for the submit thread to the queue (vk_sync.c)
 // Copy of the last presented swapchain image, for probes: on, the next presents read the image back into a host buffer
 // and wait for the GPU. *px stays valid until the next present; the format is the swapchain's. Returns 0 with no frame.

@@ -79,7 +79,7 @@ static int pipeline(VkCtx *c, VkFormat fmt) {
     if (U.pipe && U.fmt == fmt) return 1;
     if (U.pipe) {   // another swapchain format: earlier presents may still use the old pipeline
         vk_queue_lock();
-        vkDeviceWaitIdle(c->device);
+        vk_device_wait_idle(c->device);
         vk_queue_unlock();
         vkDestroyPipeline(c->device, U.pipe, NULL);
         U.pipe = VK_NULL_HANDLE;
@@ -136,7 +136,7 @@ VkImageView vk_hdr_ui_target(VkCommandBuffer cb, uint32_t w, uint32_t h) {
     if (!U.ok) return VK_NULL_HANDLE;
     if (U.img && (U.w != w || U.h != h)) {   // another size: earlier presents may still read the old image
         vk_queue_lock();
-        vkDeviceWaitIdle(c->device);
+        vk_device_wait_idle(c->device);
         vk_queue_unlock();
         free_image(c);
     }
